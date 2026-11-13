@@ -1,7 +1,12 @@
 package me.muriloscolari.quicky.ui
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -13,12 +18,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -29,14 +34,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
@@ -44,6 +52,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -56,14 +66,12 @@ import me.muriloscolari.quicky.ble.UiStyle
 import me.muriloscolari.quicky.update.ReleaseInfo
 import me.muriloscolari.quicky.update.UpdateSource
 
-private val XiaomiBlue = Color(0xFF2878FF)
-private val XiaomiCyan = Color(0xFF00D2FF)
-private val XiaomiViolet = Color(0xFF7B42F6)
-private val XiaomiGreen = Color(0xFF00C48C)
-private val TextPrimary = Color(0xFFF5F7FA)
-private val TextSecondary = Color(0xFF9AA4B5)
+private val AccentBlue = Color(0xFF3478F6)
+private val AccentGreen = Color(0xFF28C76F)
+private val TextPrimary = Color(0xFFF2F4F8)
+private val TextSecondary = Color(0xFF8C95A6)
+private val DividerSubtle = Color(0x14FFFFFF)
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun QuickyScreen(
     state: QcyUiState,
@@ -87,426 +95,309 @@ fun QuickyScreen(
     onCheckUpdateNow: () -> Unit,
     onDownloadAndInstallUpdate: (ReleaseInfo) -> Unit
 ) {
+    var showSettings by rememberSaveable { mutableStateOf(false) }
     val isXiaomi = state.uiStyle == UiStyle.XIAOMI_HYPEROS
+
+    BackHandler(enabled = showSettings) {
+        showSettings = false
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(if (isXiaomi) Color(0xFF080B12) else Color(0xFF111318))
+            .background(if (isXiaomi) Color(0xFF0A0C12) else Color(0xFF121316))
     ) {
-        // Xiaomi HyperOS Ambient Blurred Orbs Background
+        // Refined, subtle HyperOS atmospheric top glow (no visual clutter)
         if (isXiaomi) {
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
-                    .blur(88.dp)
+                    .blur(110.dp)
             ) {
                 drawCircle(
-                    color = XiaomiBlue.copy(alpha = 0.36f),
-                    radius = size.minDimension * 0.48f,
-                    center = Offset(size.width * 0.18f, size.height * 0.14f)
-                )
-                drawCircle(
-                    color = XiaomiCyan.copy(alpha = 0.24f),
-                    radius = size.minDimension * 0.42f,
-                    center = Offset(size.width * 0.85f, size.height * 0.30f)
-                )
-                drawCircle(
-                    color = XiaomiViolet.copy(alpha = 0.26f),
-                    radius = size.minDimension * 0.50f,
-                    center = Offset(size.width * 0.50f, size.height * 0.82f)
+                    color = AccentBlue.copy(alpha = 0.15f),
+                    radius = size.minDimension * 0.58f,
+                    center = Offset(size.width * 0.5f, size.height * 0.08f)
                 )
             }
         }
 
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .statusBarsPadding()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 18.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            // Top Header
-            HeaderSection(
-                state = state,
-                isXiaomi = isXiaomi,
-                onScanClick = onScanClick,
-                onDisconnectClick = onDisconnectClick,
-                onRefreshClick = onRefreshClick
-            )
-
-            // Quick Cycle Banner + Battery Pods
-            BatterySection(state = state, isXiaomi = isXiaomi)
-
-            // CRITICAL CARD: Sleep Mode (Ignore Touch Controls on Connect)
-            SleepModeTouchLockCard(
-                state = state,
-                isXiaomi = isXiaomi,
-                onToggleSleepMode = onToggleSleepMode,
-                onToggleAutoSleepOnConnect = onToggleAutoSleepOnConnect,
-                onToggleLowLatency = onToggleLowLatency
-            )
-
-            // Noise Control (ANC / Ambiente / OFF + Cycle Button + Sub-scenes)
-            NoiseControlCard(
-                state = state,
-                isXiaomi = isXiaomi,
-                onCycleAncClick = onCycleAncClick,
-                onSelectAncMode = onSelectAncMode,
-                onSelectAncCmdId = onSelectAncCmdId
-            )
-
-            // Discovered Devices (when disconnected or scanning)
-            if (!state.connected) {
-                DiscoveredDevicesCard(
+        AnimatedContent(
+            targetState = showSettings,
+            transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(150)) },
+            label = "pageTransition"
+        ) { inSettings ->
+            if (inSettings) {
+                SettingsPage(
                     state = state,
                     isXiaomi = isXiaomi,
+                    checkingUpdate = checkingUpdate,
+                    downloadingPercent = downloadingPercent,
+                    availableRelease = availableRelease,
+                    updateStatusText = updateStatusText,
+                    onBackClick = { showSettings = false },
+                    onSelectUiStyle = onSelectUiStyle,
+                    onSelectUpdateSource = onSelectUpdateSource,
+                    onToggleAutoCheckUpdates = onToggleAutoCheckUpdates,
+                    onCheckUpdateNow = onCheckUpdateNow,
+                    onDownloadAndInstallUpdate = onDownloadAndInstallUpdate
+                )
+            } else {
+                MainControlsPage(
+                    state = state,
+                    isXiaomi = isXiaomi,
+                    hasUpdateBadge = availableRelease != null,
+                    onOpenSettings = { showSettings = true },
                     onScanClick = onScanClick,
-                    onConnectDevice = onConnectDevice
+                    onConnectDevice = onConnectDevice,
+                    onDisconnectClick = onDisconnectClick,
+                    onRefreshClick = onRefreshClick,
+                    onCycleAncClick = onCycleAncClick,
+                    onSelectAncMode = onSelectAncMode,
+                    onSelectAncCmdId = onSelectAncCmdId,
+                    onToggleSleepMode = onToggleSleepMode,
+                    onToggleAutoSleepOnConnect = onToggleAutoSleepOnConnect,
+                    onToggleLowLatency = onToggleLowLatency
                 )
             }
-
-            // Settings: UI Style (Xiaomi Blur vs Material 3 Leve) & Auto-Updater (Forgejo vs GitLab)
-            SettingsAndUpdaterCard(
-                state = state,
-                isXiaomi = isXiaomi,
-                checkingUpdate = checkingUpdate,
-                downloadingPercent = downloadingPercent,
-                availableRelease = availableRelease,
-                updateStatusText = updateStatusText,
-                onSelectUiStyle = onSelectUiStyle,
-                onSelectUpdateSource = onSelectUpdateSource,
-                onToggleAutoCheckUpdates = onToggleAutoCheckUpdates,
-                onCheckUpdateNow = onCheckUpdateNow,
-                onDownloadAndInstallUpdate = onDownloadAndInstallUpdate
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }
 
 @Composable
-private fun AdaptiveGlassCard(
-    isXiaomi: Boolean,
-    modifier: Modifier = Modifier,
-    highlightColor: Color? = null,
-    content: @Composable ColumnScope.() -> Unit
-) {
-    val corner = if (isXiaomi) 28.dp else 16.dp
-    val shape = RoundedCornerShape(corner)
-
-    if (isXiaomi) {
-        val bgBrush = Brush.verticalGradient(
-            colors = listOf(
-                (highlightColor ?: Color.White).copy(alpha = if (highlightColor != null) 0.18f else 0.11f),
-                Color.White.copy(alpha = 0.05f)
-            )
-        )
-        val borderBrush = Brush.linearGradient(
-            colors = listOf(
-                (highlightColor ?: Color.White).copy(alpha = 0.28f),
-                Color.White.copy(alpha = 0.06f)
-            )
-        )
-        Column(
-            modifier = modifier
-                .fillMaxWidth()
-                .clip(shape)
-                .background(bgBrush)
-                .border(1.dp, borderBrush, shape)
-                .padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            content = content
-        )
-    } else {
-        Surface(
-            modifier = modifier.fillMaxWidth(),
-            shape = shape,
-            color = Color(0xFF1B1E26),
-            border = BorderStroke(1.dp, highlightColor?.copy(alpha = 0.5f) ?: Color(0xFF2B303C))
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-                content = content
-            )
-        }
-    }
-}
-
-@Composable
-private fun HeaderSection(
+private fun MainControlsPage(
     state: QcyUiState,
     isXiaomi: Boolean,
+    hasUpdateBadge: Boolean,
+    onOpenSettings: () -> Unit,
     onScanClick: () -> Unit,
+    onConnectDevice: (String) -> Unit,
     onDisconnectClick: () -> Unit,
-    onRefreshClick: () -> Unit
+    onRefreshClick: () -> Unit,
+    onCycleAncClick: () -> Unit,
+    onSelectAncMode: (AncCycleMode) -> Unit,
+    onSelectAncCmdId: (Int) -> Unit,
+    onToggleSleepMode: (Boolean) -> Unit,
+    onToggleAutoSleepOnConnect: (Boolean) -> Unit,
+    onToggleLowLatency: (Boolean) -> Unit
 ) {
-    AdaptiveGlassCard(
-        isXiaomi = isXiaomi,
-        highlightColor = if (state.connected) XiaomiBlue else null
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Minimal Top Bar
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(9.dp)
-                            .clip(CircleShape)
-                            .background(if (state.connected) XiaomiGreen else if (state.connecting || state.scanning) XiaomiCyan else Color(0xFF636E7B))
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = if (isXiaomi) "HYPEROS AUDIO CENTER" else "QUICKY QCY CONTROL",
-                        color = XiaomiCyan,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp
-                    )
-                }
-                Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = state.modelTitle,
                     color = TextPrimary,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Text(
-                    text = state.statusMessage,
-                    color = TextSecondary,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(if (state.connected) AccentGreen else Color(0xFF5E6675))
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = state.statusMessage,
+                        color = TextSecondary,
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 if (state.connected) {
-                    PillActionButton(
-                        text = "↻",
-                        isXiaomi = isXiaomi,
-                        active = false,
-                        onClick = onRefreshClick
-                    )
-                    PillActionButton(
-                        text = "Sair",
-                        isXiaomi = isXiaomi,
-                        active = false,
-                        onClick = onDisconnectClick
-                    )
-                } else {
-                    PillActionButton(
-                        text = if (state.scanning) "Buscando..." else "Conectar",
-                        isXiaomi = isXiaomi,
+                    SmallCircleButton(isXiaomi = isXiaomi, onClick = onRefreshClick) {
+                        Text("↻", color = TextPrimary, fontSize = 16.sp)
+                    }
+                }
+                Box {
+                    SmallCircleButton(isXiaomi = isXiaomi, onClick = onOpenSettings) {
+                        SettingsGearIcon()
+                    }
+                    if (hasUpdateBadge) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .size(9.dp)
+                                .clip(CircleShape)
+                                .background(AccentBlue)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Unified Battery Card
+        RefinedSurfaceCard(isXiaomi = isXiaomi) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                BatteryColumn(
+                    label = "Esquerdo",
+                    level = state.battery.left,
+                    charging = state.battery.leftCharging,
+                    modifier = Modifier.weight(1f)
+                )
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(44.dp)
+                        .background(DividerSubtle)
+                )
+                BatteryColumn(
+                    label = "Direito",
+                    level = state.battery.right,
+                    charging = state.battery.rightCharging,
+                    modifier = Modifier.weight(1f)
+                )
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(44.dp)
+                        .background(DividerSubtle)
+                )
+                BatteryColumn(
+                    label = "Estojo",
+                    level = state.battery.caseLevel,
+                    charging = state.battery.caseCharging,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+
+        // Connection / Discovery Card (only when disconnected)
+        if (!state.connected) {
+            RefinedSurfaceCard(isXiaomi = isXiaomi) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (state.scanning) "Procurando fones..." else "Fone desconectado",
+                            color = TextPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = "Retire os fones do estojo para conectar",
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                    SoftPillButton(
+                        text = if (state.scanning) "Buscando" else "Procurar",
                         active = true,
                         onClick = onScanClick
                     )
                 }
+
+                if (state.devices.isNotEmpty()) {
+                    HorizontalDivider(color = DividerSubtle)
+                    state.devices.forEach { dev ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = dev.modelTitle,
+                                    color = TextPrimary,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = "${dev.bleAddress} · L ${dev.battery.left}% R ${dev.battery.right}%",
+                                    color = TextSecondary,
+                                    fontSize = 12.sp
+                                )
+                            }
+                            SoftPillButton(
+                                text = "Conectar",
+                                active = false,
+                                onClick = { onConnectDevice(dev.bleAddress) }
+                            )
+                        }
+                    }
+                }
             }
         }
-    }
-}
 
-@Composable
-private fun BatterySection(state: QcyUiState, isXiaomi: Boolean) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        BatteryPod(
-            title = "ESQUERDO",
-            level = state.battery.left,
-            charging = state.battery.leftCharging,
+        // Noise Control Card (ANC / Ambiente / OFF)
+        NoiseControlSection(
+            state = state,
             isXiaomi = isXiaomi,
-            modifier = Modifier.weight(1f)
+            onCycleAncClick = onCycleAncClick,
+            onSelectAncMode = onSelectAncMode,
+            onSelectAncCmdId = onSelectAncCmdId
         )
-        BatteryPod(
-            title = "DIREITO",
-            level = state.battery.right,
-            charging = state.battery.rightCharging,
-            isXiaomi = isXiaomi,
-            modifier = Modifier.weight(1f)
-        )
-        BatteryPod(
-            title = "ESTOJO",
-            level = state.battery.caseLevel,
-            charging = state.battery.caseCharging,
-            isXiaomi = isXiaomi,
-            modifier = Modifier.weight(1f)
-        )
-    }
-}
 
-@Composable
-private fun BatteryPod(
-    title: String,
-    level: Int,
-    charging: Boolean,
-    isXiaomi: Boolean,
-    modifier: Modifier = Modifier
-) {
-    val valid = level in 0..100
-    val barColor = when {
-        !valid -> Color(0xFF424A57)
-        charging -> XiaomiCyan
-        level <= 15 -> Color(0xFFFF4D4F)
-        level <= 25 -> Color(0xFFFFA940)
-        else -> XiaomiGreen
-    }
-
-    AdaptiveGlassCard(isXiaomi = isXiaomi, modifier = modifier) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = title,
-                color = TextSecondary,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold
-            )
-            if (charging) {
-                Text(text = "⚡", color = XiaomiCyan, fontSize = 11.sp)
-            }
-        }
-        Text(
-            text = if (valid) "$level%" else "--%",
-            color = TextPrimary,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.ExtraBold
-        )
-        LinearProgressIndicator(
-            progress = { if (valid) (level / 100f) else 0f },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(6.dp)
-                .clip(RoundedCornerShape(99.dp)),
-            color = barColor,
-            trackColor = Color.White.copy(alpha = 0.10f)
-        )
-    }
-}
-
-@Composable
-private fun SleepModeTouchLockCard(
-    state: QcyUiState,
-    isXiaomi: Boolean,
-    onToggleSleepMode: (Boolean) -> Unit,
-    onToggleAutoSleepOnConnect: (Boolean) -> Unit,
-    onToggleLowLatency: (Boolean) -> Unit
-) {
-    AdaptiveGlassCard(
-        isXiaomi = isXiaomi,
-        highlightColor = if (state.sleepModeEnabled || state.autoSleepOnConnect) XiaomiViolet else null
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "CONTROLE DE TOQUE · MODO SONO",
-                    color = XiaomiCyan,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.8.sp
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = "Ignorar toques na lateral do fone",
-                    color = TextPrimary,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "Evita pausas ou trocas acidentais quando você encosta no fone",
-                    color = TextSecondary,
-                    fontSize = 12.sp
-                )
-            }
-            Switch(
+        // Touch & Audio Preferences Card (Sleep Mode + Auto-Sleep on Connect + Low Latency)
+        RefinedSurfaceCard(isXiaomi = isXiaomi) {
+            SettingToggleRow(
+                title = "Ignorar toques na lateral",
+                subtitle = "Modo Sono · desativa os comandos de toque do fone",
                 checked = state.sleepModeEnabled,
-                onCheckedChange = onToggleSleepMode,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = XiaomiBlue
-                )
+                onCheckedChange = onToggleSleepMode
             )
-        }
 
-        // Auto-enable on connect toggle (Highlighted)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(if (isXiaomi) 18.dp else 12.dp))
-                .background(
-                    if (state.autoSleepOnConnect) XiaomiBlue.copy(alpha = 0.20f)
-                    else Color.White.copy(alpha = 0.05f)
-                )
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Ativar sozinho ao conectar no celular",
-                    color = TextPrimary,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "Sempre que o fone conectar, envia o comando 0x10 para desativar os toques sozinho",
-                    color = TextSecondary,
-                    fontSize = 11.sp
-                )
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            Switch(
+            HorizontalDivider(color = DividerSubtle)
+
+            SettingToggleRow(
+                title = "Bloquear toques ao conectar",
+                subtitle = "Ativa o Modo Sono sozinho sempre que conectar no celular",
                 checked = state.autoSleepOnConnect,
-                onCheckedChange = onToggleAutoSleepOnConnect,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = XiaomiGreen
-                )
+                onCheckedChange = onToggleAutoSleepOnConnect
+            )
+
+            HorizontalDivider(color = DividerSubtle)
+
+            SettingToggleRow(
+                title = "Modo Jogo",
+                subtitle = "Baixa latência para jogos e vídeos",
+                checked = state.lowLatencyEnabled,
+                onCheckedChange = onToggleLowLatency
             )
         }
 
-        // Low latency quick switch
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Modo Jogo (Baixa Latência)",
-                    color = TextPrimary,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium
-                )
-                Text(
-                    text = "Reduz atraso de áudio em jogos e vídeos",
-                    color = TextSecondary,
-                    fontSize = 11.sp
-                )
-            }
-            Switch(
-                checked = state.lowLatencyEnabled,
-                onCheckedChange = onToggleLowLatency,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = XiaomiBlue
-                )
+        if (state.connected) {
+            Text(
+                text = "Desconectar fone",
+                color = TextSecondary,
+                fontSize = 13.sp,
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClick = onDisconnectClick)
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
             )
         }
     }
@@ -514,88 +405,75 @@ private fun SleepModeTouchLockCard(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun NoiseControlCard(
+private fun NoiseControlSection(
     state: QcyUiState,
     isXiaomi: Boolean,
     onCycleAncClick: () -> Unit,
     onSelectAncMode: (AncCycleMode) -> Unit,
     onSelectAncCmdId: (Int) -> Unit
 ) {
-    AdaptiveGlassCard(isXiaomi = isXiaomi) {
+    RefinedSurfaceCard(isXiaomi = isXiaomi) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "CANCELAMENTO DE RUÍDO",
-                    color = XiaomiCyan,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.8.sp
-                )
-                Text(
-                    text = "Modo atual: ${state.ancCycleMode.label}",
-                    color = TextPrimary,
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            PillActionButton(
-                text = "Ciclar: ${state.ancCycleMode.label} ↻",
-                isXiaomi = isXiaomi,
-                active = true,
-                onClick = onCycleAncClick
+            Text(
+                text = "Controle de ruído",
+                color = TextPrimary,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = "Ciclar ↻",
+                color = AccentBlue,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable(onClick = onCycleAncClick)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
             )
         }
 
-        Text(
-            text = "Dica: adicione o botão 'QCY Ruído' na barra rápida do Android (Quick Settings) para ciclar entre ANC, Ambiente e OFF com 1 toque.",
-            color = TextSecondary,
-            fontSize = 11.sp
-        )
-
-        // 3 Main Segmented Pills: ANC | Ambiente | OFF
+        // Clean Capsule Segmented Control (HyperOS / Material style)
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(if (isXiaomi) 18.dp else 12.dp))
+                .background(Color.Black.copy(alpha = 0.28f))
+                .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             AncCycleMode.entries.forEach { mode ->
                 val selected = state.ancCycleMode == mode
                 val bg by animateColorAsState(
-                    targetValue = if (selected) XiaomiBlue else Color.White.copy(alpha = 0.07f),
-                    animationSpec = tween(200),
-                    label = "ancPill"
+                    targetValue = if (selected) AccentBlue else Color.Transparent,
+                    animationSpec = tween(180),
+                    label = "ancSeg"
                 )
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .height(46.dp)
-                        .clip(RoundedCornerShape(if (isXiaomi) 20.dp else 12.dp))
+                        .height(40.dp)
+                        .clip(RoundedCornerShape(if (isXiaomi) 14.dp else 9.dp))
                         .background(bg)
                         .clickable { onSelectAncMode(mode) },
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = mode.label,
-                        color = if (selected) Color.White else TextPrimary,
+                        color = if (selected) Color.White else TextSecondary,
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
                     )
                 }
             }
         }
 
-        // Sub-scenes when in ANC mode (MeloBuds Pro)
+        // Sub-scenes only when ANC is active
         if (state.ancCycleMode == AncCycleMode.ANC) {
-            Text(
-                text = "Cenário ANC (QCY MeloBuds Pro)",
-                color = TextSecondary,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold
-            )
+            HorizontalDivider(color = DividerSubtle)
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -603,82 +481,28 @@ private fun NoiseControlCard(
             ) {
                 AncSubScene.entries.forEach { scene ->
                     val active = state.ancCmdId in scene.startCmdId..scene.endCmdId
-                    PillActionButton(
-                        text = scene.label,
-                        isXiaomi = isXiaomi,
-                        active = active,
-                        onClick = { onSelectAncCmdId(scene.defaultCmdId) }
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun DiscoveredDevicesCard(
-    state: QcyUiState,
-    isXiaomi: Boolean,
-    onScanClick: () -> Unit,
-    onConnectDevice: (String) -> Unit
-) {
-    AdaptiveGlassCard(isXiaomi = isXiaomi) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "FONES QCY POR PERTO",
-                color = XiaomiCyan,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold
-            )
-            PillActionButton(
-                text = if (state.scanning) "Procurando..." else "Procurar QCY",
-                isXiaomi = isXiaomi,
-                active = false,
-                onClick = onScanClick
-            )
-        }
-
-        if (state.devices.isEmpty()) {
-            Text(
-                text = if (state.scanning) "Escaneando anúncios BLE QCY (0x521C)..."
-                else "Retire os fones do estojo e toque em Procurar QCY.",
-                color = TextSecondary,
-                fontSize = 12.sp
-            )
-        } else {
-            state.devices.forEach { dev ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color.White.copy(alpha = 0.06f))
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(if (isXiaomi) 14.dp else 8.dp))
+                            .background(
+                                if (active) AccentBlue.copy(alpha = 0.22f)
+                                else Color.White.copy(alpha = 0.05f)
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = if (active) AccentBlue.copy(alpha = 0.6f) else Color.Transparent,
+                                shape = RoundedCornerShape(if (isXiaomi) 14.dp else 8.dp)
+                            )
+                            .clickable { onSelectAncCmdId(scene.defaultCmdId) }
+                            .padding(horizontal = 12.dp, vertical = 7.dp)
+                    ) {
                         Text(
-                            text = dev.modelTitle,
-                            color = TextPrimary,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "${dev.bleAddress} · L ${dev.battery.left}% R ${dev.battery.right}%",
-                            color = TextSecondary,
-                            fontSize = 11.sp
+                            text = scene.label,
+                            color = if (active) TextPrimary else TextSecondary,
+                            fontSize = 12.sp,
+                            fontWeight = if (active) FontWeight.Medium else FontWeight.Normal
                         )
                     }
-                    PillActionButton(
-                        text = "Conectar",
-                        isXiaomi = isXiaomi,
-                        active = true,
-                        onClick = { onConnectDevice(dev.bleAddress) }
-                    )
                 }
             }
         }
@@ -686,172 +510,183 @@ private fun DiscoveredDevicesCard(
 }
 
 @Composable
-private fun SettingsAndUpdaterCard(
+private fun SettingsPage(
     state: QcyUiState,
     isXiaomi: Boolean,
     checkingUpdate: Boolean,
     downloadingPercent: Int?,
     availableRelease: ReleaseInfo?,
     updateStatusText: String,
+    onBackClick: () -> Unit,
     onSelectUiStyle: (UiStyle) -> Unit,
     onSelectUpdateSource: (UpdateSource) -> Unit,
     onToggleAutoCheckUpdates: (Boolean) -> Unit,
     onCheckUpdateNow: () -> Unit,
     onDownloadAndInstallUpdate: (ReleaseInfo) -> Unit
 ) {
-    AdaptiveGlassCard(isXiaomi = isXiaomi) {
-        Text(
-            text = "INTERFACE & ATUALIZAÇÕES AUTOMÁTICAS",
-            color = XiaomiCyan,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 0.8.sp
-        )
-
-        // UI Style Picker: Xiaomi HyperOS (Blur) vs Material 3 (Leve)
-        Text(
-            text = "Linguagem de Design da Interface",
-            color = TextPrimary,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold
-        )
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // Top Header with Back Button
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            UiStyle.entries.forEach { style ->
-                val selected = state.uiStyle == style
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(if (isXiaomi) 18.dp else 12.dp))
-                        .background(if (selected) XiaomiBlue else Color.White.copy(alpha = 0.06f))
-                        .clickable { onSelectUiStyle(style) }
-                        .padding(12.dp)
-                ) {
-                    Text(
-                        text = style.label,
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = style.subtitle,
-                        color = Color.White.copy(alpha = 0.78f),
-                        fontSize = 10.sp
-                    )
-                }
+            SmallCircleButton(isXiaomi = isXiaomi, onClick = onBackClick) {
+                Text("←", color = TextPrimary, fontSize = 18.sp)
             }
-        }
-
-        Spacer(modifier = Modifier.height(2.dp))
-
-        // Update Source Picker: Forgejo vs GitLab
-        Text(
-            text = "Fonte de Atualização (Releases)",
-            color = TextPrimary,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            UpdateSource.entries.forEach { source ->
-                val selected = state.updateSource == source
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(if (isXiaomi) 18.dp else 12.dp))
-                        .background(if (selected) XiaomiBlue else Color.White.copy(alpha = 0.06f))
-                        .clickable { onSelectUpdateSource(source) }
-                        .padding(12.dp)
-                ) {
-                    Text(
-                        text = source.label,
-                        color = Color.White,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = source.hostLabel,
-                        color = Color.White.copy(alpha = 0.78f),
-                        fontSize = 10.sp
-                    )
-                }
-            }
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Procurar atualizações ao abrir o app",
-                    color = TextPrimary,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium
-                )
-                Text(
-                    text = "Versão instalada: v${BuildConfig.VERSION_NAME} · $updateStatusText",
-                    color = TextSecondary,
-                    fontSize = 11.sp
-                )
-            }
-            Switch(
-                checked = state.autoCheckUpdates,
-                onCheckedChange = onToggleAutoCheckUpdates,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = XiaomiBlue
-                )
+            Text(
+                text = "Configurações",
+                color = TextPrimary,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.SemiBold
             )
         }
 
-        if (downloadingPercent != null) {
-            LinearProgressIndicator(
-                progress = { downloadingPercent / 100f },
+        // UI Style Card
+        RefinedSurfaceCard(isXiaomi = isXiaomi) {
+            Text(
+                text = "Aparência da interface",
+                color = TextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium
+            )
+            UiStyle.entries.forEachIndexed { idx, style ->
+                if (idx > 0) HorizontalDivider(color = DividerSubtle)
+                val selected = state.uiStyle == style
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onSelectUiStyle(style) }
+                        .padding(vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = style.label,
+                            color = TextPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = style.subtitle,
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                    RadioDot(selected = selected)
+                }
+            }
+        }
+
+        // Updates Card
+        RefinedSurfaceCard(isXiaomi = isXiaomi) {
+            Text(
+                text = "Atualizações do aplicativo",
+                color = TextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = "Escolha de onde o aplicativo deve buscar novas versões",
+                color = TextSecondary,
+                fontSize = 12.sp
+            )
+
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(6.dp)
-                    .clip(RoundedCornerShape(99.dp)),
-                color = XiaomiCyan,
-                trackColor = Color.White.copy(alpha = 0.1f)
-            )
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Button(
-                onClick = onCheckUpdateNow,
-                enabled = !checkingUpdate && downloadingPercent == null,
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.12f))
+                    .clip(RoundedCornerShape(if (isXiaomi) 16.dp else 10.dp))
+                    .background(Color.Black.copy(alpha = 0.26f))
+                    .padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                Text(
-                    text = if (checkingUpdate) "Consultando ${state.updateSource.label}..." else "Verificar no ${state.updateSource.label}",
-                    color = TextPrimary,
-                    fontSize = 12.sp
+                UpdateSource.entries.forEach { source ->
+                    val selected = state.updateSource == source
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(38.dp)
+                            .clip(RoundedCornerShape(if (isXiaomi) 12.dp else 8.dp))
+                            .background(if (selected) AccentBlue else Color.Transparent)
+                            .clickable { onSelectUpdateSource(source) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "${source.label} (${source.hostLabel})",
+                            color = if (selected) Color.White else TextSecondary,
+                            fontSize = 12.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            HorizontalDivider(color = DividerSubtle)
+
+            SettingToggleRow(
+                title = "Verificar ao abrir o aplicativo",
+                subtitle = "Versão atual: v${BuildConfig.VERSION_NAME} · $updateStatusText",
+                checked = state.autoCheckUpdates,
+                onCheckedChange = onToggleAutoCheckUpdates
+            )
+
+            if (downloadingPercent != null) {
+                LinearProgressIndicator(
+                    progress = { downloadingPercent / 100f },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(5.dp)
+                        .clip(RoundedCornerShape(99.dp)),
+                    color = AccentBlue,
+                    trackColor = Color.White.copy(alpha = 0.08f)
                 )
             }
 
-            if (availableRelease != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 Button(
-                    onClick = { onDownloadAndInstallUpdate(availableRelease) },
-                    enabled = downloadingPercent == null,
+                    onClick = onCheckUpdateNow,
+                    enabled = !checkingUpdate && downloadingPercent == null,
                     modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = XiaomiGreen)
+                    shape = RoundedCornerShape(if (isXiaomi) 14.dp else 10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.08f))
                 ) {
                     Text(
-                        text = "Atualizar (${availableRelease.tagName})",
-                        color = Color.Black,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp
+                        text = if (checkingUpdate) "Verificando..." else "Procurar atualização",
+                        color = TextPrimary,
+                        fontSize = 13.sp
                     )
+                }
+
+                if (availableRelease != null) {
+                    Button(
+                        onClick = { onDownloadAndInstallUpdate(availableRelease) },
+                        enabled = downloadingPercent == null,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(if (isXiaomi) 14.dp else 10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
+                    ) {
+                        Text(
+                            text = "Instalar ${availableRelease.tagName}",
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 13.sp
+                        )
+                    }
                 }
             }
         }
@@ -859,26 +694,206 @@ private fun SettingsAndUpdaterCard(
 }
 
 @Composable
-private fun PillActionButton(
-    text: String,
+private fun RefinedSurfaceCard(
     isXiaomi: Boolean,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val shape = RoundedCornerShape(if (isXiaomi) 24.dp else 14.dp)
+    if (isXiaomi) {
+        Column(
+            modifier = modifier
+                .fillMaxWidth()
+                .clip(shape)
+                .background(Color(0xFF171B24).copy(alpha = 0.78f))
+                .border(0.7.dp, Color.White.copy(alpha = 0.08f), shape)
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            content = content
+        )
+    } else {
+        Surface(
+            modifier = modifier.fillMaxWidth(),
+            shape = shape,
+            color = Color(0xFF1C1E24),
+            border = BorderStroke(1.dp, Color(0xFF282C35))
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                content = content
+            )
+        }
+    }
+}
+
+@Composable
+private fun BatteryColumn(
+    label: String,
+    level: Int,
+    charging: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val valid = level in 0..100
+    val barColor = when {
+        !valid -> Color(0xFF3E4554)
+        charging -> AccentBlue
+        level <= 15 -> Color(0xFFEA5455)
+        level <= 25 -> Color(0xFFFF9F43)
+        else -> AccentGreen
+    }
+
+    Column(
+        modifier = modifier.padding(horizontal = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text(
+            text = label,
+            color = TextSecondary,
+            fontSize = 12.sp
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = if (valid) "$level%" else "--",
+                color = TextPrimary,
+                fontSize = 21.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            if (charging) {
+                Spacer(modifier = Modifier.width(3.dp))
+                Text(text = "⚡", color = AccentBlue, fontSize = 12.sp)
+            }
+        }
+        LinearProgressIndicator(
+            progress = { if (valid) (level / 100f) else 0f },
+            modifier = Modifier
+                .width(56.dp)
+                .height(4.dp)
+                .clip(RoundedCornerShape(99.dp)),
+            color = barColor,
+            trackColor = Color.White.copy(alpha = 0.08f)
+        )
+    }
+}
+
+@Composable
+private fun SettingToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(
+                text = title,
+                color = TextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = subtitle,
+                color = TextSecondary,
+                fontSize = 12.sp
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.White,
+                checkedTrackColor = AccentBlue,
+                uncheckedThumbColor = Color(0xFF9AA4B5),
+                uncheckedTrackColor = Color(0xFF262B36)
+            )
+        )
+    }
+}
+
+@Composable
+private fun SmallCircleButton(
+    isXiaomi: Boolean,
+    onClick: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(38.dp)
+            .clip(CircleShape)
+            .background(if (isXiaomi) Color(0xFF1A1F2B) else Color(0xFF222630))
+            .border(0.7.dp, Color.White.copy(alpha = 0.08f), CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        content()
+    }
+}
+
+@Composable
+private fun SoftPillButton(
+    text: String,
     active: Boolean,
     onClick: () -> Unit
 ) {
-    val shape = RoundedCornerShape(if (isXiaomi) 99.dp else 10.dp)
     Box(
         modifier = Modifier
-            .clip(shape)
-            .background(if (active) XiaomiBlue else Color.White.copy(alpha = 0.10f))
+            .clip(RoundedCornerShape(99.dp))
+            .background(if (active) AccentBlue else Color.White.copy(alpha = 0.08f))
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = text,
             color = Color.White,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium
         )
+    }
+}
+
+@Composable
+private fun RadioDot(selected: Boolean) {
+    Box(
+        modifier = Modifier
+            .size(20.dp)
+            .clip(CircleShape)
+            .border(
+                width = if (selected) 6.dp else 1.5.dp,
+                color = if (selected) AccentBlue else Color(0xFF555E6F),
+                shape = CircleShape
+            )
+    )
+}
+
+@Composable
+private fun SettingsGearIcon() {
+    Canvas(modifier = Modifier.size(17.dp)) {
+        val r = size.minDimension * 0.28f
+        drawCircle(
+            color = TextPrimary,
+            radius = r,
+            style = Stroke(width = 3.2f)
+        )
+        val outer = size.minDimension * 0.46f
+        val inner = size.minDimension * 0.34f
+        for (i in 0 until 8) {
+            val angle = Math.toRadians((i * 45).toDouble())
+            val cos = kotlin.math.cos(angle).toFloat()
+            val sin = kotlin.math.sin(angle).toFloat()
+            drawLine(
+                color = TextPrimary,
+                start = Offset(center.x + cos * inner, center.y + sin * inner),
+                end = Offset(center.x + cos * outer, center.y + sin * outer),
+                strokeWidth = 3.0f,
+                cap = StrokeCap.Round
+            )
+        }
     }
 }

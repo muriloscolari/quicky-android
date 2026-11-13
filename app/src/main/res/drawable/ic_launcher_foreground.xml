@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Left Earbud Head -->
+    <path
+        android:fillColor="#FFF5F7FA"
+        android:pathData="M38,34C31.9,34 27,38.9 27,45C27,50.2 30.6,54.5 35.5,55.7L35.5,71C35.5,73.8 37.7,76 40.5,76C43.3,76 45.5,73.8 45.5,71L45.5,45C45.5,38.9 42.1,34 38,34Z" />
+    <!-- Left Earbud Silicone Tip -->
+    <path
+        android:fillColor="#FF3478F6"
+        android:pathData="M47,41C49.8,41 52,43.2 52,46C52,48.8 49.8,51 47,51L45.5,51L45.5,41L47,41Z" />
+    <!-- Left Stem Accent -->
+    <path
+        android:fillColor="#FF3478F6"
+        android:pathData="M39.5,58h2v10h-2z" />
+
+    <!-- Right Earbud Head -->
+    <path
+        android:fillColor="#FFF5F7FA"
+        android:pathData="M70,34C76.1,34 81,38.9 81,45C81,50.2 77.4,54.5 72.5,55.7L72.5,71C72.5,73.8 70.3,76 67.5,76C64.7,76 62.5,73.8 62.5,71L62.5,45C62.5,38.9 65.9,34 70,34Z" />
+    <!-- Right Earbud Silicone Tip -->
+    <path
+        android:fillColor="#FF3478F6"
+        android:pathData="M61,41C58.2,41 56,43.2 56,46C56,48.8 58.2,51 61,51L62.5,51L62.5,41L61,41Z" />
+    <!-- Right Stem Accent -->
+    <path
+        android:fillColor="#FF3478F6"
+        android:pathData="M66.5,58h2v10h-2z" />
+</vector>
