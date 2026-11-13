@@ -1,0 +1,81 @@
+package me.muriloscolari.quicky
+
+import me.muriloscolari.quicky.ble.AncCycleMode
+import me.muriloscolari.quicky.ble.QcyProtocol
+import me.muriloscolari.quicky.update.AppUpdater
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class QcyProtocolAndUpdaterTest {
+
+    @Test
+    fun sleepModeCommandFramesCorrectly() {
+        val enable = QcyProtocol.buildSleepModeCommand(true)
+        assertArrayEquals(
+            byteArrayOf(0xFF.toByte(), 0x03, 0x10, 0x01, 0x01),
+            enable
+        )
+
+        val disable = QcyProtocol.buildSleepModeCommand(false)
+        assertArrayEquals(
+            byteArrayOf(0xFF.toByte(), 0x03, 0x10, 0x01, 0x02),
+            disable
+        )
+    }
+
+    @Test
+    fun meloBudsProAncCommandUnpacksTo0x17() {
+        val ancPacket = QcyProtocol.buildAncCommand(AncCycleMode.ANC.meloBudsCmdId) // 65794 = 0x010102
+        assertArrayEquals(
+            byteArrayOf(0xFF.toByte(), 0x05, 0x17, 0x03, 0x01, 0x01, 0x02),
+            ancPacket
+        )
+
+        val ambientPacket = QcyProtocol.buildAncCommand(AncCycleMode.AMBIENT.meloBudsCmdId) // 196868 = 0x030104
+        assertArrayEquals(
+            byteArrayOf(0xFF.toByte(), 0x05, 0x17, 0x03, 0x03, 0x01, 0x04),
+            ambientPacket
+        )
+
+        val offPacket = QcyProtocol.buildAncCommand(AncCycleMode.OFF.meloBudsCmdId) // 131072 = 0x020000
+        assertArrayEquals(
+            byteArrayOf(0xFF.toByte(), 0x05, 0x17, 0x03, 0x02, 0x00, 0x00),
+            offPacket
+        )
+    }
+
+    @Test
+    fun ancCycleOrderIsAncThenAmbientThenOff() {
+        var mode = AncCycleMode.ANC
+        mode = mode.next()
+        assertEquals(AncCycleMode.AMBIENT, mode)
+        mode = mode.next()
+        assertEquals(AncCycleMode.OFF, mode)
+        mode = mode.next()
+        assertEquals(AncCycleMode.ANC, mode)
+    }
+
+    @Test
+    fun batteryBytesParseLevelAndChargingFlag() {
+        val bytes = byteArrayOf((80 or 0x80).toByte(), 75.toByte(), 0.toByte())
+        val parsed = QcyProtocol.parseBatteryBytes(bytes)
+        assertNotNull(parsed)
+        assertEquals(80, parsed!!.left)
+        assertTrue(parsed.leftCharging)
+        assertEquals(75, parsed.right)
+        assertFalse(parsed.rightCharging)
+        assertEquals(0, parsed.caseLevel)
+    }
+
+    @Test
+    fun versionComparisonDetectsNewerSemanticVersion() {
+        assertTrue(AppUpdater.isNewerVersion("0.1.0", "v0.2.0"))
+        assertTrue(AppUpdater.isNewerVersion("v0.1.0", "0.1.1"))
+        assertFalse(AppUpdater.isNewerVersion("0.1.0", "v0.1.0"))
+        assertFalse(AppUpdater.isNewerVersion("0.2.0", "0.1.9"))
+    }
+}
