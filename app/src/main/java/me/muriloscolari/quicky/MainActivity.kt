@@ -95,6 +95,18 @@ class MainActivity : ComponentActivity() {
                     onToggleSleepMode = { enabled -> QcyBleManager.setSleepMode(enabled) },
                     onToggleAutoSleepOnConnect = { enabled -> QcyBleManager.setAutoSleepOnConnect(enabled) },
                     onToggleLowLatency = { enabled -> QcyBleManager.setLowLatency(enabled) },
+                    onToggleLdac = { enabled -> QcyBleManager.setLdacEnabled(enabled) },
+                    onToggleDualConnect = { enabled -> QcyBleManager.setDualConnectEnabled(enabled) },
+                    onStartFindEarbuds = { side -> QcyBleManager.startFindingEarbuds(side) },
+                    onStopFindEarbuds = { QcyBleManager.stopFindingEarbuds() },
+                    onToggleNotifications = { enabled ->
+                        if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                            ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                        ) {
+                            permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+                        }
+                        QcyBleManager.setNotificationsEnabled(enabled)
+                    },
                     onSelectUiStyle = { style -> QcyBleManager.setUiStyle(style) },
                     onSelectUpdateSource = { source ->
                         QcyBleManager.setUpdateSource(source)
@@ -138,7 +150,7 @@ class MainActivity : ComponentActivity() {
                 needed += Manifest.permission.ACCESS_FINE_LOCATION
             }
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && QcyBleManager.state.value.notificationsEnabled) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 needed += Manifest.permission.POST_NOTIFICATIONS
             }

@@ -22,6 +22,12 @@ enum class AncSubScene(val label: String, val startCmdId: Int, val endCmdId: Int
     ANTI_WIND("Anti-vento", 66560, 66560, 66560)
 }
 
+enum class FindEarbudSide(val label: String, val leftGain: Float, val rightGain: Float) {
+    LEFT("Esquerdo", 1f, 0f),
+    BOTH("Ambos", 1f, 1f),
+    RIGHT("Direito", 0f, 1f)
+}
+
 data class QcyBattery(
     val left: Int = -1,
     val right: Int = -1,
@@ -86,6 +92,47 @@ object QcyProtocol {
     fun buildLowLatencyCommand(enabled: Boolean): ByteArray {
         val state: Byte = if (enabled) 0x01 else 0x02
         return packCommand(0x09, byteArrayOf(state))
+    }
+
+    /**
+     * Command 0x23 — LDAC High-Res Codec Switch.
+     * 0x01 = Enable, 0x02 = Disable.
+     */
+    fun buildLdacCommand(enabled: Boolean): ByteArray {
+        val state: Byte = if (enabled) 0x01 else 0x02
+        return packCommand(0x23, byteArrayOf(state))
+    }
+
+    /**
+     * Command 0x24 — Dual Device Connection (Multipoint).
+     * 0x01 = Enable, 0x02 = Disable.
+     */
+    fun buildDualConnectionCommand(enabled: Boolean): ByteArray {
+        val state: Byte = if (enabled) 0x01 else 0x02
+        return packCommand(0x24, byteArrayOf(state))
+    }
+
+    /**
+     * Command 0x05 — Light Flash (used when finding earbuds).
+     * 0x01 = Flashing on, 0x00 = Off.
+     */
+    fun buildLightFlashCommand(enabled: Boolean): ByteArray {
+        val state: Byte = if (enabled) 0x01 else 0x00
+        return packCommand(0x05, byteArrayOf(state))
+    }
+
+    /**
+     * Command 0x3D — Tone Play (triggers built-in notification/search beep on earbuds).
+     */
+    fun buildTonePlayCommand(toneId: Int = 1): ByteArray {
+        return packCommand(0x3D, byteArrayOf((toneId and 0xFF).toByte()))
+    }
+
+    /**
+     * Command 0xFE — Request current value for any command ID.
+     */
+    fun buildRequestDataCommand(cmdId: Int): ByteArray {
+        return packCommand(0xFE, byteArrayOf((cmdId and 0xFF).toByte()))
     }
 
     /**

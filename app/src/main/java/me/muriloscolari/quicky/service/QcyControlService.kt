@@ -31,6 +31,12 @@ class QcyControlService : Service() {
         const val EXTRA_DEVICE_ADDRESS = "extra_device_address"
 
         fun start(context: Context, deviceAddress: String? = null) {
+            QcyBleManager.init(context.applicationContext)
+            if (!QcyBleManager.state.value.notificationsEnabled) {
+                stop(context)
+                QcyBleManager.connectOrAutoScan(deviceAddress)
+                return
+            }
             val intent = Intent(context, QcyControlService::class.java).apply {
                 action = ACTION_START
                 if (!deviceAddress.isNullOrBlank()) {
@@ -43,6 +49,14 @@ class QcyControlService : Service() {
                 runCatching { context.startService(intent) }
             }
         }
+
+        fun stop(context: Context) {
+            runCatching {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                nm?.cancel(NOTIFICATION_ID)
+                context.stopService(Intent(context, QcyControlService::class.java))
+            }
+        }
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -50,13 +64,32 @@ class QcyControlService : Service() {
     override fun onCreate() {
         super.onCreate()
         QcyBleManager.init(applicationContext)
+        if (!QcyBleManager.state.value.notificationsEnabled) {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            nm?.cancel(NOTIFICATION_ID)
+            stopSelf()
+            return
+        }
         createChannel()
         startForegroundCompat(buildNotification())
 
         serviceScope.launch {
-            QcyBleManager.state.collectLatest {
+            QcyBleManager.state.collectLatest { st ->
                 val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                nm?.notify(NOTIFICATION_ID, buildNotification())
+                if (!st.notificationsEnabled) {
+                    runCatching {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                            stopForeground(STOP_FOREGROUND_REMOVE)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            stopForeground(true)
+                        }
+                    }
+                    nm?.cancel(NOTIFICATION_ID)
+                    stopSelf()
+                } else {
+                    nm?.notify(NOTIFICATION_ID, buildNotification())
+                }
             }
         }
     }

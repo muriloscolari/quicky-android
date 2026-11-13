@@ -32,6 +32,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -40,9 +41,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -61,6 +64,7 @@ import androidx.compose.ui.unit.sp
 import me.muriloscolari.quicky.BuildConfig
 import me.muriloscolari.quicky.ble.AncCycleMode
 import me.muriloscolari.quicky.ble.AncSubScene
+import me.muriloscolari.quicky.ble.FindEarbudSide
 import me.muriloscolari.quicky.ble.QcyUiState
 import me.muriloscolari.quicky.ble.UiStyle
 import me.muriloscolari.quicky.update.ReleaseInfo
@@ -89,6 +93,11 @@ fun QuickyScreen(
     onToggleSleepMode: (Boolean) -> Unit,
     onToggleAutoSleepOnConnect: (Boolean) -> Unit,
     onToggleLowLatency: (Boolean) -> Unit,
+    onToggleLdac: (Boolean) -> Unit,
+    onToggleDualConnect: (Boolean) -> Unit,
+    onStartFindEarbuds: (FindEarbudSide) -> Unit,
+    onStopFindEarbuds: () -> Unit,
+    onToggleNotifications: (Boolean) -> Unit,
     onSelectUiStyle: (UiStyle) -> Unit,
     onSelectUpdateSource: (UpdateSource) -> Unit,
     onToggleAutoCheckUpdates: (Boolean) -> Unit,
@@ -136,6 +145,7 @@ fun QuickyScreen(
                     availableRelease = availableRelease,
                     updateStatusText = updateStatusText,
                     onBackClick = { showSettings = false },
+                    onToggleNotifications = onToggleNotifications,
                     onSelectUiStyle = onSelectUiStyle,
                     onSelectUpdateSource = onSelectUpdateSource,
                     onToggleAutoCheckUpdates = onToggleAutoCheckUpdates,
@@ -157,7 +167,11 @@ fun QuickyScreen(
                     onSelectAncCmdId = onSelectAncCmdId,
                     onToggleSleepMode = onToggleSleepMode,
                     onToggleAutoSleepOnConnect = onToggleAutoSleepOnConnect,
-                    onToggleLowLatency = onToggleLowLatency
+                    onToggleLowLatency = onToggleLowLatency,
+                    onToggleLdac = onToggleLdac,
+                    onToggleDualConnect = onToggleDualConnect,
+                    onStartFindEarbuds = onStartFindEarbuds,
+                    onStopFindEarbuds = onStopFindEarbuds
                 )
             }
         }
@@ -179,7 +193,11 @@ private fun MainControlsPage(
     onSelectAncCmdId: (Int) -> Unit,
     onToggleSleepMode: (Boolean) -> Unit,
     onToggleAutoSleepOnConnect: (Boolean) -> Unit,
-    onToggleLowLatency: (Boolean) -> Unit
+    onToggleLowLatency: (Boolean) -> Unit,
+    onToggleLdac: (Boolean) -> Unit,
+    onToggleDualConnect: (Boolean) -> Unit,
+    onStartFindEarbuds: (FindEarbudSide) -> Unit,
+    onStopFindEarbuds: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -360,7 +378,7 @@ private fun MainControlsPage(
             onSelectAncCmdId = onSelectAncCmdId
         )
 
-        // Touch & Audio Preferences Card (Sleep Mode + Auto-Sleep on Connect + Low Latency)
+        // Touch & Audio Preferences Card (Sleep Mode + Auto-Sleep on Connect + Low Latency + Dual Connect + LDAC)
         RefinedSurfaceCard(isXiaomi = isXiaomi) {
             SettingToggleRow(
                 title = "Ignorar toques na lateral",
@@ -386,7 +404,33 @@ private fun MainControlsPage(
                 checked = state.lowLatencyEnabled,
                 onCheckedChange = onToggleLowLatency
             )
+
+            HorizontalDivider(color = DividerSubtle)
+
+            SettingToggleRow(
+                title = "Conexão Dupla (Multiponto)",
+                subtitle = "Conectar em 2 aparelhos · desativa LDAC e reinicia o fone",
+                checked = state.dualConnectEnabled,
+                onCheckedChange = onToggleDualConnect
+            )
+
+            HorizontalDivider(color = DividerSubtle)
+
+            SettingToggleRow(
+                title = "Áudio HD (LDAC)",
+                subtitle = "Alta definição · desativa Conexão Dupla e reinicia o fone",
+                checked = state.ldacEnabled,
+                onCheckedChange = onToggleLdac
+            )
         }
+
+        // Find Earbuds Card
+        FindEarbudsCard(
+            state = state,
+            isXiaomi = isXiaomi,
+            onStartFindEarbuds = onStartFindEarbuds,
+            onStopFindEarbuds = onStopFindEarbuds
+        )
 
         if (state.connected) {
             Text(
@@ -510,6 +554,131 @@ private fun NoiseControlSection(
 }
 
 @Composable
+private fun FindEarbudsCard(
+    state: QcyUiState,
+    isXiaomi: Boolean,
+    onStartFindEarbuds: (FindEarbudSide) -> Unit,
+    onStopFindEarbuds: () -> Unit
+) {
+    var selectedSide by rememberSaveable { mutableStateOf(FindEarbudSide.BOTH) }
+    var pendingConfirmSide by remember { mutableStateOf<FindEarbudSide?>(null) }
+    val isRinging = state.findingSide != null
+
+    if (pendingConfirmSide != null) {
+        AlertDialog(
+            onDismissRequest = { pendingConfirmSide = null },
+            containerColor = Color(0xFF191D26),
+            titleContentColor = TextPrimary,
+            textContentColor = TextSecondary,
+            title = {
+                Text(
+                    text = "Os fones estão fora do ouvido?",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            },
+            text = {
+                Text(
+                    text = "Para proteger sua audição, retire os fones do ouvido antes de tocar o alerta sonoro de localização.",
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val side = pendingConfirmSide ?: FindEarbudSide.BOTH
+                        pendingConfirmSide = null
+                        onStartFindEarbuds(side)
+                    }
+                ) {
+                    Text("Emitir som", color = AccentBlue, fontWeight = FontWeight.SemiBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingConfirmSide = null }) {
+                    Text("Cancelar", color = TextSecondary)
+                }
+            }
+        )
+    }
+
+    RefinedSurfaceCard(isXiaomi = isXiaomi) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                Text(
+                    text = "Encontrar fones",
+                    color = TextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = if (isRinging) {
+                        "Emitindo bip no lado ${state.findingSide?.label}..."
+                    } else {
+                        "Toca um bip agudo para localizar os fones por perto"
+                    },
+                    color = if (isRinging) AccentBlue else TextSecondary,
+                    fontSize = 12.sp
+                )
+            }
+
+            SoftPillButton(
+                text = if (isRinging) "Parar som" else "Tocar som",
+                active = isRinging,
+                onClick = {
+                    if (isRinging) {
+                        onStopFindEarbuds()
+                    } else {
+                        pendingConfirmSide = selectedSide
+                    }
+                }
+            )
+        }
+
+        // L / Ambos / R channel selector
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(if (isXiaomi) 16.dp else 10.dp))
+                .background(Color.Black.copy(alpha = 0.26f))
+                .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            FindEarbudSide.entries.forEach { side ->
+                val activeSide = state.findingSide ?: selectedSide
+                val selected = activeSide == side
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(36.dp)
+                        .clip(RoundedCornerShape(if (isXiaomi) 12.dp else 8.dp))
+                        .background(if (selected) AccentBlue else Color.Transparent)
+                        .clickable {
+                            selectedSide = side
+                            if (isRinging) {
+                                onStartFindEarbuds(side)
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = side.label,
+                        color = if (selected) Color.White else TextSecondary,
+                        fontSize = 12.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SettingsPage(
     state: QcyUiState,
     isXiaomi: Boolean,
@@ -518,6 +687,7 @@ private fun SettingsPage(
     availableRelease: ReleaseInfo?,
     updateStatusText: String,
     onBackClick: () -> Unit,
+    onToggleNotifications: (Boolean) -> Unit,
     onSelectUiStyle: (UiStyle) -> Unit,
     onSelectUpdateSource: (UpdateSource) -> Unit,
     onToggleAutoCheckUpdates: (Boolean) -> Unit,
@@ -547,6 +717,24 @@ private fun SettingsPage(
                 color = TextPrimary,
                 fontSize = 22.sp,
                 fontWeight = FontWeight.SemiBold
+            )
+        }
+
+        // Notifications & System Shortcut Card
+        RefinedSurfaceCard(isXiaomi = isXiaomi) {
+            SettingToggleRow(
+                title = "Notificações do aplicativo",
+                subtitle = "Exibir controles rápidos fixos na barra de notificações",
+                checked = state.notificationsEnabled,
+                onCheckedChange = onToggleNotifications
+            )
+
+            HorizontalDivider(color = DividerSubtle)
+
+            Text(
+                text = "Dica: toque no botão 'QCY Ruído' nas Configurações Rápidas do Android para ciclar ANC/Ambiente/OFF, ou segure o botão para abrir este aplicativo direto.",
+                color = TextSecondary,
+                fontSize = 12.sp
             )
         }
 
