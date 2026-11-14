@@ -37,6 +37,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -67,10 +69,12 @@ import me.muriloscolari.quicky.ble.AncSubScene
 import me.muriloscolari.quicky.ble.FindEarbudSide
 import me.muriloscolari.quicky.ble.QcyKeyAction
 import me.muriloscolari.quicky.ble.QcyKeyId
+import me.muriloscolari.quicky.ble.QcyProtocol
 import me.muriloscolari.quicky.ble.QcyUiState
 import me.muriloscolari.quicky.ble.UiStyle
 import me.muriloscolari.quicky.update.ReleaseInfo
 import me.muriloscolari.quicky.update.UpdateSource
+import kotlin.math.roundToInt
 
 private val AccentBlue = Color(0xFF3478F6)
 private val AccentGreen = Color(0xFF28C76F)
@@ -543,8 +547,11 @@ private fun NoiseControlSection(
             }
         }
 
-        // Sub-scenes only when ANC is active
+        // Sub-scenes and intensity slider when ANC is active, or 7-step level slider for Ambient
         if (state.ancCycleMode == AncCycleMode.ANC) {
+            val activeScene = QcyProtocol.subSceneForCmdId(state.ancCmdId)
+            val currentAncLevel = activeScene?.levelFromCmdId(state.ancCmdId)
+
             HorizontalDivider(color = DividerSubtle)
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
@@ -565,7 +572,14 @@ private fun NoiseControlSection(
                                 color = if (active) AccentBlue.copy(alpha = 0.6f) else Color.Transparent,
                                 shape = RoundedCornerShape(if (isXiaomi) 14.dp else 8.dp)
                             )
-                            .clickable { onSelectAncCmdId(scene.defaultCmdId) }
+                            .clickable {
+                                val targetCmd = if (scene.levelCount > 1 && currentAncLevel != null) {
+                                    scene.cmdIdForLevel(currentAncLevel)
+                                } else {
+                                    scene.defaultCmdId
+                                }
+                                onSelectAncCmdId(targetCmd)
+                            }
                             .padding(horizontal = 12.dp, vertical = 7.dp)
                     ) {
                         Text(
@@ -577,7 +591,92 @@ private fun NoiseControlSection(
                     }
                 }
             }
+
+            if (activeScene != null && activeScene.levelCount > 1 && currentAncLevel != null) {
+                NoiseLevelSlider(
+                    title = "Intensidade · ${activeScene.label}",
+                    currentLevel = currentAncLevel,
+                    levelCount = activeScene.levelCount,
+                    ancCmdId = state.ancCmdId,
+                    levelText = { lvl ->
+                        when (lvl) {
+                            1 -> "Suave (1/${activeScene.levelCount})"
+                            2 -> "Médio (2/${activeScene.levelCount})"
+                            else -> "Forte ($lvl/${activeScene.levelCount})"
+                        }
+                    },
+                    onCommitLevel = { lvl -> onSelectAncCmdId(activeScene.cmdIdForLevel(lvl)) }
+                )
+            }
+        } else if (state.ancCycleMode == AncCycleMode.AMBIENT) {
+            HorizontalDivider(color = DividerSubtle)
+            NoiseLevelSlider(
+                title = "Nível de transparência",
+                currentLevel = QcyProtocol.ambientLevelFromCmdId(state.ancCmdId),
+                levelCount = QcyProtocol.AMBIENT_LEVEL_COUNT,
+                ancCmdId = state.ancCmdId,
+                levelText = { lvl -> "Nível $lvl/${QcyProtocol.AMBIENT_LEVEL_COUNT}" },
+                onCommitLevel = { lvl -> onSelectAncCmdId(QcyProtocol.ambientCmdIdForLevel(lvl)) }
+            )
         }
+    }
+}
+
+@Composable
+private fun NoiseLevelSlider(
+    title: String,
+    currentLevel: Int,
+    levelCount: Int,
+    ancCmdId: Int,
+    levelText: (Int) -> String,
+    onCommitLevel: (Int) -> Unit
+) {
+    var draggingLevel by remember(ancCmdId) { mutableStateOf<Float?>(null) }
+    val displayLevel = (draggingLevel?.roundToInt() ?: currentLevel).coerceIn(1, levelCount)
+    val sliderValue = draggingLevel ?: currentLevel.toFloat()
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = title,
+                color = TextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = levelText(displayLevel),
+                color = AccentBlue,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        Slider(
+            value = sliderValue,
+            onValueChange = { draggingLevel = it },
+            onValueChangeFinished = {
+                val targetLevel = (draggingLevel?.roundToInt() ?: currentLevel).coerceIn(1, levelCount)
+                draggingLevel = null
+                if (targetLevel != currentLevel) {
+                    onCommitLevel(targetLevel)
+                }
+            },
+            valueRange = 1f..levelCount.toFloat(),
+            steps = (levelCount - 2).coerceAtLeast(0),
+            colors = SliderDefaults.colors(
+                thumbColor = AccentBlue,
+                activeTrackColor = AccentBlue,
+                inactiveTrackColor = Color.White.copy(alpha = 0.14f),
+                activeTickColor = Color.White.copy(alpha = 0.55f),
+                inactiveTickColor = Color.White.copy(alpha = 0.25f)
+            )
+        )
     }
 }
 

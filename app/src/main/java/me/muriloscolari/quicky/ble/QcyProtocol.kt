@@ -19,7 +19,18 @@ enum class AncSubScene(val label: String, val startCmdId: Int, val endCmdId: Int
     INDOOR("Interno", 65792, 65794, 65794),
     COMMUTING("Transporte", 66048, 66050, 66050),
     NOISY("Ruidoso", 66304, 66306, 66306),
-    ANTI_WIND("Anti-vento", 66560, 66560, 66560)
+    ANTI_WIND("Anti-vento", 66560, 66560, 66560);
+
+    val levelCount: Int
+        get() = (endCmdId - startCmdId + 1).coerceAtLeast(1)
+
+    fun levelFromCmdId(cmdId: Int): Int? =
+        if (cmdId in startCmdId..endCmdId) (cmdId - startCmdId + 1) else null
+
+    fun cmdIdForLevel(level: Int): Int {
+        val idx = (level - 1).coerceIn(0, levelCount - 1)
+        return startCmdId + idx
+    }
 }
 
 enum class FindEarbudSide(val label: String, val leftGain: Float, val rightGain: Float) {
@@ -79,6 +90,9 @@ data class QcyAdvertisement(
 object QcyProtocol {
     const val COMPANY_ID_QCY = 0x521C
     const val VENDOR_MELOBUDS_PRO = 19786
+    const val AMBIENT_START_CMD_ID = 196864
+    const val AMBIENT_END_CMD_ID = 196870
+    const val AMBIENT_LEVEL_COUNT = AMBIENT_END_CMD_ID - AMBIENT_START_CMD_ID + 1
 
     val SERVICE_UUID: UUID = UUID.fromString("0000a001-0000-1000-8000-00805f9b34fb")
     val COMMAND_UUID: UUID = UUID.fromString("00001001-0000-1000-8000-00805f9b34fb")
@@ -186,8 +200,38 @@ object QcyProtocol {
 
     fun modeFromCmdId(cmdId: Int): AncCycleMode = when {
         cmdId == 0 || cmdId == 131072 -> AncCycleMode.OFF
-        cmdId == 3 || cmdId in 196864..196870 -> AncCycleMode.AMBIENT
+        cmdId == 3 || cmdId in AMBIENT_START_CMD_ID..AMBIENT_END_CMD_ID -> AncCycleMode.AMBIENT
         else -> AncCycleMode.ANC
+    }
+
+    fun subSceneForCmdId(cmdId: Int): AncSubScene? =
+        AncSubScene.entries.firstOrNull { cmdId in it.startCmdId..it.endCmdId }
+
+    fun ambientLevelFromCmdId(cmdId: Int): Int =
+        if (cmdId in AMBIENT_START_CMD_ID..AMBIENT_END_CMD_ID) {
+            (cmdId - AMBIENT_START_CMD_ID + 1).coerceIn(1, AMBIENT_LEVEL_COUNT)
+        } else {
+            (AncCycleMode.AMBIENT.meloBudsCmdId - AMBIENT_START_CMD_ID + 1)
+        }
+
+    fun ambientCmdIdForLevel(level: Int): Int =
+        AMBIENT_START_CMD_ID + (level.coerceIn(1, AMBIENT_LEVEL_COUNT) - 1)
+
+    fun formatAncShortLabel(cmdId: Int): String {
+        val mode = modeFromCmdId(cmdId)
+        return when (mode) {
+            AncCycleMode.OFF -> mode.label
+            AncCycleMode.AMBIENT -> "${mode.label} · ${ambientLevelFromCmdId(cmdId)}/$AMBIENT_LEVEL_COUNT"
+            AncCycleMode.ANC -> {
+                val scene = subSceneForCmdId(cmdId) ?: return mode.label
+                if (scene.levelCount > 1) {
+                    val lvl = scene.levelFromCmdId(cmdId) ?: scene.levelCount
+                    "${scene.label} · $lvl/${scene.levelCount}"
+                } else {
+                    scene.label
+                }
+            }
+        }
     }
 
     /**

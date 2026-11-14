@@ -59,6 +59,8 @@ data class QcyUiState(
     val battery: QcyBattery = QcyBattery(),
     val ancCycleMode: AncCycleMode = AncCycleMode.OFF,
     val ancCmdId: Int = AncCycleMode.OFF.meloBudsCmdId,
+    val preferredAncCmdId: Int = AncCycleMode.ANC.meloBudsCmdId,
+    val preferredAmbientCmdId: Int = AncCycleMode.AMBIENT.meloBudsCmdId,
     val sleepModeEnabled: Boolean = false,
     val autoSleepOnConnect: Boolean = true,
     val lowLatencyEnabled: Boolean = false,
@@ -89,6 +91,8 @@ object QcyBleManager {
     private const val KEY_LAST_OTHER_MAC = "last_other_mac"
     private const val KEY_NOTIFICATIONS_ENABLED = "notifications_enabled"
     private const val KEY_ANC_CYCLE_MODE = "last_anc_cycle_mode"
+    private const val KEY_PREFERRED_ANC_CMD = "preferred_anc_cmd_id"
+    private const val KEY_PREFERRED_AMBIENT_CMD = "preferred_ambient_cmd_id"
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val _state = MutableStateFlow(QcyUiState())
@@ -164,10 +168,20 @@ object QcyBleManager {
         val lastOther = prefs.getString(KEY_LAST_OTHER_MAC, "") ?: ""
         val notificationsEnabled = prefs.getBoolean(KEY_NOTIFICATIONS_ENABLED, false)
         val savedAncName = prefs.getString(KEY_ANC_CYCLE_MODE, AncCycleMode.OFF.name) ?: AncCycleMode.OFF.name
+        val savedPrefAnc = prefs.getInt(KEY_PREFERRED_ANC_CMD, AncCycleMode.ANC.meloBudsCmdId)
+            .takeIf { QcyProtocol.modeFromCmdId(it) == AncCycleMode.ANC } ?: AncCycleMode.ANC.meloBudsCmdId
+        val savedPrefAmbient = prefs.getInt(KEY_PREFERRED_AMBIENT_CMD, AncCycleMode.AMBIENT.meloBudsCmdId)
+            .takeIf { it in QcyProtocol.AMBIENT_START_CMD_ID..QcyProtocol.AMBIENT_END_CMD_ID }
+            ?: AncCycleMode.AMBIENT.meloBudsCmdId
 
         val style = runCatching { UiStyle.valueOf(styleName) }.getOrDefault(UiStyle.XIAOMI_HYPEROS)
         val source = runCatching { UpdateSource.valueOf(sourceName) }.getOrDefault(UpdateSource.FORGEJO)
         val savedAnc = runCatching { AncCycleMode.valueOf(savedAncName) }.getOrDefault(AncCycleMode.OFF)
+        val initialCmdId = when (savedAnc) {
+            AncCycleMode.ANC -> savedPrefAnc
+            AncCycleMode.AMBIENT -> savedPrefAmbient
+            AncCycleMode.OFF -> AncCycleMode.OFF.meloBudsCmdId
+        }
 
         _state.update {
             it.copy(
@@ -180,7 +194,9 @@ object QcyBleManager {
                 lastOtherMac = lastOther,
                 notificationsEnabled = notificationsEnabled,
                 ancCycleMode = savedAnc,
-                ancCmdId = savedAnc.meloBudsCmdId
+                ancCmdId = initialCmdId,
+                preferredAncCmdId = savedPrefAnc,
+                preferredAmbientCmdId = savedPrefAmbient
             )
         }
 
@@ -790,19 +806,16 @@ object QcyBleManager {
             // 4. Execute any queued ANC mode triggered from Quick Settings Tile while disconnected
             if (pendingAnc != null) {
                 commandChar?.let { cChar ->
-                    val packet = QcyProtocol.buildAncCommand(pendingAnc.meloBudsCmdId)
+                    val targetCmdId = preferredCmdIdForMode(pendingAnc)
+                    val packet = QcyProtocol.buildAncCommand(targetCmdId)
                     enqueueGattOp(
                         GattOp.WriteChar(cChar, packet) { sent ->
                             if (sent) {
-                                appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                                    ?.edit()?.putString(KEY_ANC_CYCLE_MODE, pendingAnc.name)?.apply()
-                                _state.update {
-                                    it.copy(
-                                        ancCmdId = pendingAnc.meloBudsCmdId,
-                                        ancCycleMode = pendingAnc,
-                                        statusMessage = "Modo de ruído: ${pendingAnc.label}"
-                                    )
-                                }
+                                persistAncSelection(
+                                    cmdId = targetCmdId,
+                                    cycleMode = pendingAnc,
+                                    statusMessage = "Modo de ruído: ${QcyProtocol.formatAncShortLabel(targetCmdId)}"
+                                )
                             }
                             mainHandler.postDelayed({ notifyConnectWaiters() }, 250L)
                         }
@@ -935,7 +948,7 @@ object QcyBleManager {
                     val noise = bytes[paramStart + 2].toInt() and 0xFF
                     val packed = (mode shl 16) or (sub shl 8) or noise
                     val cycle = QcyProtocol.modeFromCmdId(packed)
-                    _state.update { it.copy(ancCmdId = packed, ancCycleMode = cycle) }
+                    persistAncSelection(cmdId = packed, cycleMode = cycle, statusMessage = null)
                 }
                 0x23 -> if (paramLen >= 1) {
                     val enabled = (bytes[paramStart].toInt() and 0xFF) == 0x01
@@ -1203,25 +1216,61 @@ object QcyBleManager {
         }
     }
 
-    fun setAncCmdId(cmdId: Int) {
-        val packet = QcyProtocol.buildAncCommand(cmdId)
-        val sent = writeCommand(packet)
-        val cycleMode = QcyProtocol.modeFromCmdId(cmdId)
-        appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            ?.edit()?.putString(KEY_ANC_CYCLE_MODE, cycleMode.name)?.apply()
+    fun preferredCmdIdForMode(mode: AncCycleMode): Int {
+        val st = _state.value
+        return when (mode) {
+            AncCycleMode.ANC -> st.preferredAncCmdId
+                .takeIf { QcyProtocol.modeFromCmdId(it) == AncCycleMode.ANC }
+                ?: AncCycleMode.ANC.meloBudsCmdId
+            AncCycleMode.AMBIENT -> st.preferredAmbientCmdId
+                .takeIf { it in QcyProtocol.AMBIENT_START_CMD_ID..QcyProtocol.AMBIENT_END_CMD_ID }
+                ?: AncCycleMode.AMBIENT.meloBudsCmdId
+            AncCycleMode.OFF -> AncCycleMode.OFF.meloBudsCmdId
+        }
+    }
+
+    private fun persistAncSelection(cmdId: Int, cycleMode: AncCycleMode, statusMessage: String?) {
+        val st = _state.value
+        val newPrefAnc = if (cycleMode == AncCycleMode.ANC) cmdId else st.preferredAncCmdId
+        val newPrefAmbient = if (cycleMode == AncCycleMode.AMBIENT &&
+            cmdId in QcyProtocol.AMBIENT_START_CMD_ID..QcyProtocol.AMBIENT_END_CMD_ID
+        ) {
+            cmdId
+        } else {
+            st.preferredAmbientCmdId
+        }
+        appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()?.apply {
+            putString(KEY_ANC_CYCLE_MODE, cycleMode.name)
+            putInt(KEY_PREFERRED_ANC_CMD, newPrefAnc)
+            putInt(KEY_PREFERRED_AMBIENT_CMD, newPrefAmbient)
+            apply()
+        }
         _state.update {
             it.copy(
                 ancCmdId = cmdId,
                 ancCycleMode = cycleMode,
-                statusMessage = if (sent) "Modo de ruído: ${cycleMode.label}" else "Conectando para ${cycleMode.label}..."
+                preferredAncCmdId = newPrefAnc,
+                preferredAmbientCmdId = newPrefAmbient,
+                statusMessage = statusMessage ?: it.statusMessage
             )
         }
         appContext?.let { QcyAncTileService.requestTileUpdate(it) }
     }
 
+    fun setAncCmdId(cmdId: Int) {
+        val packet = QcyProtocol.buildAncCommand(cmdId)
+        val sent = writeCommand(packet)
+        val cycleMode = QcyProtocol.modeFromCmdId(cmdId)
+        val label = QcyProtocol.formatAncShortLabel(cmdId)
+        persistAncSelection(
+            cmdId = cmdId,
+            cycleMode = cycleMode,
+            statusMessage = if (sent) "Modo de ruído: $label" else "Conectando para $label..."
+        )
+    }
+
     fun setAncCycleMode(mode: AncCycleMode) {
-        val cmdId = mode.meloBudsCmdId
-        setAncCmdId(cmdId)
+        setAncCmdId(preferredCmdIdForMode(mode))
     }
 
     /**
@@ -1241,18 +1290,16 @@ object QcyBleManager {
     fun cycleAncModeAndEnsureConnected(onFinished: (() -> Unit)? = null): AncCycleMode {
         val baseMode = pendingAncTargetMode ?: _state.value.ancCycleMode
         val nextMode = baseMode.next()
+        val targetCmdId = preferredCmdIdForMode(nextMode)
+        val label = QcyProtocol.formatAncShortLabel(targetCmdId)
 
         if (_state.value.connected && bluetoothGatt != null && commandChar != null) {
-            appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                ?.edit()?.putString(KEY_ANC_CYCLE_MODE, nextMode.name)?.apply()
-            _state.update {
-                it.copy(
-                    ancCmdId = nextMode.meloBudsCmdId,
-                    ancCycleMode = nextMode,
-                    statusMessage = "Modo de ruído: ${nextMode.label}"
-                )
-            }
-            val queued = writeCommand(QcyProtocol.buildAncCommand(nextMode.meloBudsCmdId)) { sent ->
+            persistAncSelection(
+                cmdId = targetCmdId,
+                cycleMode = nextMode,
+                statusMessage = "Modo de ruído: $label"
+            )
+            val queued = writeCommand(QcyProtocol.buildAncCommand(targetCmdId)) { sent ->
                 if (sent) {
                     onFinished?.invoke()
                 } else {
@@ -1269,15 +1316,11 @@ object QcyBleManager {
         }
 
         pendingAncTargetMode = nextMode
-        appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            ?.edit()?.putString(KEY_ANC_CYCLE_MODE, nextMode.name)?.apply()
-        _state.update {
-            it.copy(
-                ancCmdId = nextMode.meloBudsCmdId,
-                ancCycleMode = nextMode,
-                statusMessage = "Conectando para ${nextMode.label}..."
-            )
-        }
+        persistAncSelection(
+            cmdId = targetCmdId,
+            cycleMode = nextMode,
+            statusMessage = "Conectando para $label..."
+        )
         connectOrAutoScan(onFinished = onFinished)
         return nextMode
     }

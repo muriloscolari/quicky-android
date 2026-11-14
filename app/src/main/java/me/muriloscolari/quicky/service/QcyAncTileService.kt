@@ -7,6 +7,7 @@ import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import me.muriloscolari.quicky.ble.AncCycleMode
 import me.muriloscolari.quicky.ble.QcyBleManager
+import me.muriloscolari.quicky.ble.QcyProtocol
 
 class QcyAncTileService : TileService() {
 
@@ -48,10 +49,11 @@ class QcyAncTileService : TileService() {
             AncCycleMode.OFF -> Tile.STATE_INACTIVE
         }
 
+        val shortLabel = QcyProtocol.formatAncShortLabel(s.ancCmdId)
         val subtitleText = if (pendingOrConnecting && !s.connected) {
-            "${mode.label} (conectando...)"
+            "$shortLabel (conectando...)"
         } else {
-            mode.label
+            shortLabel
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

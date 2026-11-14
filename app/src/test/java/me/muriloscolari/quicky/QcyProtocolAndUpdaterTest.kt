@@ -1,6 +1,7 @@
 package me.muriloscolari.quicky
 
 import me.muriloscolari.quicky.ble.AncCycleMode
+import me.muriloscolari.quicky.ble.AncSubScene
 import me.muriloscolari.quicky.ble.QcyProtocol
 import me.muriloscolari.quicky.update.AppUpdater
 import org.junit.Assert.assertArrayEquals
@@ -87,5 +88,29 @@ class QcyProtocolAndUpdaterTest {
         val parsed = QcyProtocol.parseKeyFunctionPairs(raw)
         assertEquals(0x00, parsed[0x09])
         assertEquals(0x0B, parsed[0x0A])
+    }
+
+    @Test
+    fun ancSubSceneAndAmbientLevelMappingsAndLabels() {
+        assertEquals(3, AncSubScene.INDOOR.levelCount)
+        assertEquals(1, AncSubScene.INDOOR.levelFromCmdId(65792))
+        assertEquals(2, AncSubScene.INDOOR.levelFromCmdId(65793))
+        assertEquals(3, AncSubScene.INDOOR.levelFromCmdId(65794))
+        assertEquals(65793, AncSubScene.INDOOR.cmdIdForLevel(2))
+
+        assertEquals(1, AncSubScene.ADAPTIVE.levelCount)
+        assertEquals(1, AncSubScene.ADAPTIVE.levelFromCmdId(66816))
+        assertEquals(66816, AncSubScene.ADAPTIVE.cmdIdForLevel(3))
+
+        assertEquals(AncSubScene.COMMUTING, QcyProtocol.subSceneForCmdId(66049))
+        assertEquals("Transporte · 2/3", QcyProtocol.formatAncShortLabel(66049))
+        assertEquals("Adaptativo", QcyProtocol.formatAncShortLabel(66816))
+
+        assertEquals(1, QcyProtocol.ambientLevelFromCmdId(196864))
+        assertEquals(5, QcyProtocol.ambientLevelFromCmdId(196868))
+        assertEquals(7, QcyProtocol.ambientLevelFromCmdId(196870))
+        assertEquals(196866, QcyProtocol.ambientCmdIdForLevel(3))
+        assertEquals("Ambiente · 3/7", QcyProtocol.formatAncShortLabel(196866))
+        assertEquals("OFF", QcyProtocol.formatAncShortLabel(AncCycleMode.OFF.meloBudsCmdId))
     }
 }
