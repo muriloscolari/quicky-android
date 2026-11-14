@@ -83,6 +83,10 @@ fun QuickyScreen(
     downloadingPercent: Int?,
     availableRelease: ReleaseInfo?,
     updateStatusText: String,
+    batteryUnrestricted: Boolean,
+    companionLinked: Boolean,
+    isXiaomiDevice: Boolean,
+    companionStatusNote: String?,
     onScanClick: () -> Unit,
     onConnectDevice: (String) -> Unit,
     onDisconnectClick: () -> Unit,
@@ -98,6 +102,9 @@ fun QuickyScreen(
     onStartFindEarbuds: (FindEarbudSide) -> Unit,
     onStopFindEarbuds: () -> Unit,
     onToggleNotifications: (Boolean) -> Unit,
+    onRequestBatteryUnrestricted: () -> Unit,
+    onRequestCompanionLink: () -> Unit,
+    onOpenXiaomiAutostart: () -> Unit,
     onSelectUiStyle: (UiStyle) -> Unit,
     onSelectUpdateSource: (UpdateSource) -> Unit,
     onToggleAutoCheckUpdates: (Boolean) -> Unit,
@@ -144,8 +151,15 @@ fun QuickyScreen(
                     downloadingPercent = downloadingPercent,
                     availableRelease = availableRelease,
                     updateStatusText = updateStatusText,
+                    batteryUnrestricted = batteryUnrestricted,
+                    companionLinked = companionLinked,
+                    isXiaomiDevice = isXiaomiDevice,
+                    companionStatusNote = companionStatusNote,
                     onBackClick = { showSettings = false },
                     onToggleNotifications = onToggleNotifications,
+                    onRequestBatteryUnrestricted = onRequestBatteryUnrestricted,
+                    onRequestCompanionLink = onRequestCompanionLink,
+                    onOpenXiaomiAutostart = onOpenXiaomiAutostart,
                     onSelectUiStyle = onSelectUiStyle,
                     onSelectUpdateSource = onSelectUpdateSource,
                     onToggleAutoCheckUpdates = onToggleAutoCheckUpdates,
@@ -686,8 +700,15 @@ private fun SettingsPage(
     downloadingPercent: Int?,
     availableRelease: ReleaseInfo?,
     updateStatusText: String,
+    batteryUnrestricted: Boolean,
+    companionLinked: Boolean,
+    isXiaomiDevice: Boolean,
+    companionStatusNote: String?,
     onBackClick: () -> Unit,
     onToggleNotifications: (Boolean) -> Unit,
+    onRequestBatteryUnrestricted: () -> Unit,
+    onRequestCompanionLink: () -> Unit,
+    onOpenXiaomiAutostart: () -> Unit,
     onSelectUiStyle: (UiStyle) -> Unit,
     onSelectUpdateSource: (UpdateSource) -> Unit,
     onToggleAutoCheckUpdates: (Boolean) -> Unit,
@@ -718,6 +739,112 @@ private fun SettingsPage(
                 fontSize = 22.sp,
                 fontWeight = FontWeight.SemiBold
             )
+        }
+
+        // Background Reliability Card (important for HyperOS / Poco & Android 14+)
+        RefinedSurfaceCard(isXiaomi = isXiaomi) {
+            Text(
+                text = "Execução em 2º plano",
+                color = TextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Text(
+                text = "Garante que o botão da barra e o Modo Sono automático funcionem mesmo após horas sem abrir o app.",
+                color = TextSecondary,
+                fontSize = 12.sp
+            )
+
+            // 1. Companion Device Association
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                    Text(
+                        text = "Vínculo de acessório (Sistema)",
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = if (companionLinked) {
+                            "Vinculado · Android acorda o app ao conectar o fone"
+                        } else {
+                            companionStatusNote ?: "Recomendado · permite despertar sem notificação fixa"
+                        },
+                        color = if (companionLinked) AccentGreen else TextSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+                SoftPillButton(
+                    text = if (companionLinked) "Vinculado" else "Vincular",
+                    active = !companionLinked,
+                    onClick = onRequestCompanionLink
+                )
+            }
+
+            HorizontalDivider(color = DividerSubtle)
+
+            // 2. Battery optimization exemption
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                    Text(
+                        text = "Bateria sem restrições",
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = if (batteryUnrestricted) {
+                            "Ativo · sistema não encerra o Bluetooth em espera"
+                        } else {
+                            "Restrito · pode impedir conexão automática em 2º plano"
+                        },
+                        color = if (batteryUnrestricted) AccentGreen else Color(0xFFFF9F43),
+                        fontSize = 12.sp
+                    )
+                }
+                SoftPillButton(
+                    text = if (batteryUnrestricted) "Ativo" else "Liberar",
+                    active = !batteryUnrestricted,
+                    onClick = onRequestBatteryUnrestricted
+                )
+            }
+
+            // 3. Xiaomi HyperOS / MIUI Autostart shortcut
+            if (isXiaomiDevice) {
+                HorizontalDivider(color = DividerSubtle)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                        Text(
+                            text = "Início Automático (HyperOS)",
+                            color = TextPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = "Ative nas configurações da Xiaomi para iniciar ao conectar o áudio",
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                    SoftPillButton(
+                        text = "Abrir",
+                        active = false,
+                        onClick = onOpenXiaomiAutostart
+                    )
+                }
+            }
         }
 
         // Notifications & System Shortcut Card

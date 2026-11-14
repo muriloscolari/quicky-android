@@ -1,5 +1,7 @@
 package me.muriloscolari.quicky.service
 
+import android.content.ComponentName
+import android.content.Context
 import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
@@ -8,20 +10,30 @@ import me.muriloscolari.quicky.ble.QcyBleManager
 
 class QcyAncTileService : TileService() {
 
+    companion object {
+        fun requestTileUpdate(context: Context) {
+            runCatching {
+                requestListeningState(
+                    context.applicationContext,
+                    ComponentName(context.applicationContext, QcyAncTileService::class.java)
+                )
+            }
+        }
+    }
+
     override fun onStartListening() {
         super.onStartListening()
         QcyBleManager.init(applicationContext)
         updateTile()
+        QcyBleManager.warmUpIfAudioConnected(applicationContext)
     }
 
     override fun onClick() {
         super.onClick()
         QcyBleManager.init(applicationContext)
-        val currentState = QcyBleManager.state.value
-        if (!currentState.connected && !currentState.connecting) {
-            QcyBleManager.connectOrAutoScan()
+        QcyBleManager.cycleAncModeAndEnsureConnected {
+            updateTile()
         }
-        QcyBleManager.cycleAncMode()
         updateTile()
     }
 
@@ -29,17 +41,24 @@ class QcyAncTileService : TileService() {
         val tile = qsTile ?: return
         val s = QcyBleManager.state.value
         val mode = s.ancCycleMode
+        val pendingOrConnecting = QcyBleManager.hasPendingAncCommand() || s.connecting || s.scanning
 
         tile.state = when (mode) {
             AncCycleMode.ANC, AncCycleMode.AMBIENT -> Tile.STATE_ACTIVE
             AncCycleMode.OFF -> Tile.STATE_INACTIVE
         }
 
+        val subtitleText = if (pendingOrConnecting && !s.connected) {
+            "${mode.label} (conectando...)"
+        } else {
+            mode.label
+        }
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             tile.label = "QCY Ruído"
-            tile.subtitle = mode.label
+            tile.subtitle = subtitleText
         } else {
-            tile.label = "QCY: ${mode.label}"
+            tile.label = "QCY: $subtitleText"
         }
         tile.updateTile()
     }

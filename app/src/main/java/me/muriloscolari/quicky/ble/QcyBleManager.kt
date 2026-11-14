@@ -12,6 +12,7 @@ import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.companion.CompanionDeviceManager
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -19,10 +20,12 @@ import android.media.AudioTrack
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import me.muriloscolari.quicky.service.QcyAncTileService
 import me.muriloscolari.quicky.service.QcyControlService
 import me.muriloscolari.quicky.update.UpdateSource
 import kotlin.math.PI
@@ -40,7 +43,8 @@ data class ScannedQcyDevice(
     val vendorId: Int,
     val rssi: Int,
     val battery: QcyBattery,
-    val controlMac: String
+    val controlMac: String,
+    val otherMac: String = ""
 )
 
 data class QcyUiState(
@@ -65,6 +69,8 @@ data class QcyUiState(
     val updateSource: UpdateSource = UpdateSource.FORGEJO,
     val autoCheckUpdates: Boolean = true,
     val lastSavedAddress: String = "",
+    val lastControlMac: String = "",
+    val lastOtherMac: String = "",
     val devices: List<ScannedQcyDevice> = emptyList(),
     val statusMessage: String = "Pronto para conectar"
 )
@@ -77,7 +83,10 @@ object QcyBleManager {
     private const val KEY_UPDATE_SOURCE = "update_source"
     private const val KEY_AUTO_UPDATE = "auto_check_updates"
     private const val KEY_LAST_ADDRESS = "last_ble_address"
+    private const val KEY_LAST_CONTROL_MAC = "last_control_mac"
+    private const val KEY_LAST_OTHER_MAC = "last_other_mac"
     private const val KEY_NOTIFICATIONS_ENABLED = "notifications_enabled"
+    private const val KEY_ANC_CYCLE_MODE = "last_anc_cycle_mode"
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val _state = MutableStateFlow(QcyUiState())
@@ -90,6 +99,15 @@ object QcyBleManager {
     private var versionChar: BluetoothGattCharacteristic? = null
     private var isScanning = false
     private val scannedMap = LinkedHashMap<String, ScannedQcyDevice>()
+
+    private var fastAutoConnectTarget: String? = null
+    private var pendingAncTargetMode: AncCycleMode? = null
+    private var gattRetryAttempted = false
+    private var wakeLock: PowerManager.WakeLock? = null
+    private val pendingConnectCallbacks = mutableListOf<() -> Unit>()
+    private val scanTimeoutRunnable = Runnable { onScanTimeoutReached() }
+    private val directFallbackRunnable = Runnable { onDirectFallbackReached() }
+    private val connectWatchdogRunnable = Runnable { onConnectWatchdogTimeout() }
 
     @Volatile
     private var findAudioThread: Thread? = null
@@ -107,10 +125,14 @@ object QcyBleManager {
         val sourceName = prefs.getString(KEY_UPDATE_SOURCE, UpdateSource.FORGEJO.name) ?: UpdateSource.FORGEJO.name
         val autoUpdate = prefs.getBoolean(KEY_AUTO_UPDATE, true)
         val lastAddr = prefs.getString(KEY_LAST_ADDRESS, "") ?: ""
+        val lastControl = prefs.getString(KEY_LAST_CONTROL_MAC, "") ?: ""
+        val lastOther = prefs.getString(KEY_LAST_OTHER_MAC, "") ?: ""
         val notificationsEnabled = prefs.getBoolean(KEY_NOTIFICATIONS_ENABLED, false)
+        val savedAncName = prefs.getString(KEY_ANC_CYCLE_MODE, AncCycleMode.OFF.name) ?: AncCycleMode.OFF.name
 
         val style = runCatching { UiStyle.valueOf(styleName) }.getOrDefault(UiStyle.XIAOMI_HYPEROS)
         val source = runCatching { UpdateSource.valueOf(sourceName) }.getOrDefault(UpdateSource.FORGEJO)
+        val savedAnc = runCatching { AncCycleMode.valueOf(savedAncName) }.getOrDefault(AncCycleMode.OFF)
 
         _state.update {
             it.copy(
@@ -119,13 +141,62 @@ object QcyBleManager {
                 updateSource = source,
                 autoCheckUpdates = autoUpdate,
                 lastSavedAddress = lastAddr,
-                notificationsEnabled = notificationsEnabled
+                lastControlMac = lastControl,
+                lastOtherMac = lastOther,
+                notificationsEnabled = notificationsEnabled,
+                ancCycleMode = savedAnc,
+                ancCmdId = savedAnc.meloBudsCmdId
             )
         }
 
         if (!notificationsEnabled) {
             QcyControlService.stop(ctx)
         }
+        ensureObservingCompanionPresence(ctx)
+    }
+
+    private fun acquireShortWakeLock(durationMs: Long = 12_000L) {
+        val ctx = appContext ?: return
+        runCatching {
+            val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+            val wl = wakeLock ?: pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Quicky:BleBackground").apply {
+                setReferenceCounted(false)
+                wakeLock = this
+            }
+            wl.acquire(durationMs)
+        }
+    }
+
+    private fun releaseShortWakeLock() {
+        runCatching {
+            wakeLock?.let { wl ->
+                if (wl.isHeld) wl.release()
+            }
+        }
+    }
+
+    private fun notifyConnectWaiters() {
+        mainHandler.removeCallbacks(connectWatchdogRunnable)
+        val callbacks = synchronized(pendingConnectCallbacks) {
+            val copy = pendingConnectCallbacks.toList()
+            pendingConnectCallbacks.clear()
+            copy
+        }
+        callbacks.forEach { cb -> runCatching { cb() } }
+        releaseShortWakeLock()
+        appContext?.let { QcyAncTileService.requestTileUpdate(it) }
+    }
+
+    private fun onConnectWatchdogTimeout() {
+        if (!_state.value.connected) {
+            _state.update {
+                it.copy(
+                    connecting = false,
+                    statusMessage = "Tempo esgotado ao conectar"
+                )
+            }
+        }
+        notifyConnectWaiters()
     }
 
     private fun adapter(): BluetoothAdapter? {
@@ -185,41 +256,105 @@ object QcyBleManager {
         }
     }
 
-    fun startScan(durationMs: Long = 10_000L, autoConnectTarget: String? = null) {
+    private fun matchesKnownTarget(dev: ScannedQcyDevice, target: String?): Boolean {
+        val t = target?.trim().orEmpty()
+        if (t.isNotEmpty()) {
+            return dev.bleAddress.equals(t, ignoreCase = true) ||
+                dev.controlMac.equals(t, ignoreCase = true) ||
+                dev.otherMac.equals(t, ignoreCase = true)
+        }
+        val s = _state.value
+        if (s.lastSavedAddress.isBlank() && s.lastControlMac.isBlank() && s.lastOtherMac.isBlank()) {
+            return true
+        }
+        return dev.bleAddress.equals(s.lastSavedAddress, ignoreCase = true) ||
+            dev.controlMac.equals(s.lastControlMac, ignoreCase = true) ||
+            dev.otherMac.equals(s.lastOtherMac, ignoreCase = true) ||
+            dev.controlMac.equals(s.lastSavedAddress, ignoreCase = true)
+    }
+
+    private fun onScanTimeoutReached() {
+        if (!isScanning) return
+        val target = fastAutoConnectTarget
+        stopScan()
+        if (target != null && !_state.value.connected && !_state.value.connecting) {
+            val match = _state.value.devices.firstOrNull { matchesKnownTarget(it, target) }
+                ?: _state.value.devices.firstOrNull()
+            if (match != null) {
+                connect(match.bleAddress)
+            } else if (target.isNotBlank()) {
+                connect(target)
+            } else {
+                notifyConnectWaiters()
+            }
+        }
+    }
+
+    private fun onDirectFallbackReached() {
+        val target = fastAutoConnectTarget?.takeIf { it.isNotBlank() }
+            ?: _state.value.lastSavedAddress.takeIf { it.isNotBlank() }
+            ?: return
+        if (isScanning && !_state.value.connected && !_state.value.connecting) {
+            stopScan()
+            connect(target)
+        }
+    }
+
+    fun startScan(
+        durationMs: Long = 10_000L,
+        autoConnectTarget: String? = null,
+        connectImmediatelyOnMatch: Boolean = false
+    ) {
         val btAdapter = adapter()
         if (btAdapter == null || !btAdapter.isEnabled) {
             _state.update { it.copy(statusMessage = "Ative o Bluetooth do celular") }
+            notifyConnectWaiters()
             return
         }
-        val scanner = btAdapter.bluetoothLeScanner ?: return
+        val scanner = btAdapter.bluetoothLeScanner
+        if (scanner == null) {
+            if (!autoConnectTarget.isNullOrBlank()) {
+                connect(autoConnectTarget)
+            } else {
+                notifyConnectWaiters()
+            }
+            return
+        }
         if (isScanning) stopScan()
 
         scannedMap.clear()
         isScanning = true
+        fastAutoConnectTarget = if (connectImmediatelyOnMatch) (autoConnectTarget ?: "") else autoConnectTarget
         _state.update { it.copy(scanning = true, statusMessage = "Procurando fones QCY...") }
 
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        scanner.startScan(null, settings, scanCallback)
-        mainHandler.postDelayed({
-            if (isScanning) {
-                stopScan()
-                if (autoConnectTarget != null) {
-                    val match = _state.value.devices.firstOrNull {
-                        it.bleAddress.equals(autoConnectTarget, ignoreCase = true) ||
-                            it.controlMac.equals(autoConnectTarget, ignoreCase = true)
-                    } ?: _state.value.devices.firstOrNull()
-                    if (match != null && !_state.value.connected && !_state.value.connecting) {
-                        connect(match.bleAddress)
-                    }
+        runCatching { scanner.startScan(null, settings, scanCallback) }
+            .onFailure {
+                isScanning = false
+                _state.update { it.copy(scanning = false, statusMessage = "Falha ao buscar BLE") }
+                if (!autoConnectTarget.isNullOrBlank()) {
+                    connect(autoConnectTarget)
+                } else {
+                    notifyConnectWaiters()
                 }
+                return
             }
-        }, durationMs)
+
+        mainHandler.removeCallbacks(scanTimeoutRunnable)
+        mainHandler.removeCallbacks(directFallbackRunnable)
+        mainHandler.postDelayed(scanTimeoutRunnable, durationMs)
+
+        if (connectImmediatelyOnMatch && (!autoConnectTarget.isNullOrBlank() || _state.value.lastSavedAddress.isNotBlank())) {
+            mainHandler.postDelayed(directFallbackRunnable, 1_200L)
+        }
     }
 
     fun stopScan() {
+        mainHandler.removeCallbacks(scanTimeoutRunnable)
+        mainHandler.removeCallbacks(directFallbackRunnable)
         if (!isScanning) return
         isScanning = false
         runCatching { adapter()?.bluetoothLeScanner?.stopScan(scanCallback) }
@@ -245,22 +380,45 @@ object QcyBleManager {
                 vendorId = parsed.vendorId,
                 rssi = result.rssi,
                 battery = parsed.battery,
-                controlMac = parsed.controlMac
+                controlMac = parsed.controlMac,
+                otherMac = parsed.otherMac
             )
             scannedMap[address] = dev
             val sorted = scannedMap.values.sortedByDescending { it.rssi }
             _state.update { it.copy(devices = sorted) }
+
+            val target = fastAutoConnectTarget
+            if (target != null && !_state.value.connected && !_state.value.connecting) {
+                if (matchesKnownTarget(dev, target)) {
+                    fastAutoConnectTarget = null
+                    connect(dev.bleAddress)
+                }
+            }
         }
     }
 
-    fun connectOrAutoScan(preferredAddress: String? = null) {
-        if (_state.value.connected || _state.value.connecting) return
+    fun connectOrAutoScan(preferredAddress: String? = null, onFinished: (() -> Unit)? = null) {
+        if (onFinished != null) {
+            synchronized(pendingConnectCallbacks) {
+                pendingConnectCallbacks.add(onFinished)
+            }
+        }
+        if (_state.value.connected && bluetoothGatt != null && commandChar != null) {
+            notifyConnectWaiters()
+            return
+        }
+        acquireShortWakeLock(12_000L)
+        mainHandler.removeCallbacks(connectWatchdogRunnable)
+        mainHandler.postDelayed(connectWatchdogRunnable, 10_000L)
+
+        if (_state.value.connecting || isScanning) return
+
         val target = preferredAddress?.takeIf { it.isNotBlank() }
             ?: _state.value.lastSavedAddress.takeIf { it.isNotBlank() }
         if (target != null) {
-            startScan(durationMs = 4_500L, autoConnectTarget = target)
+            startScan(durationMs = 4_000L, autoConnectTarget = target, connectImmediatelyOnMatch = true)
         } else {
-            startScan(durationMs = 8_000L, autoConnectTarget = "")
+            startScan(durationMs = 6_000L, autoConnectTarget = "", connectImmediatelyOnMatch = true)
         }
     }
 
@@ -268,9 +426,26 @@ object QcyBleManager {
         val ctx = appContext ?: return
         val btAdapter = adapter() ?: return
         stopScan()
-        disconnect()
+        disconnect(resetPending = false)
+        gattRetryAttempted = false
 
         val scanned = scannedMap[address]
+        if (scanned != null) {
+            ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()?.apply {
+                putString(KEY_LAST_ADDRESS, scanned.bleAddress)
+                if (scanned.controlMac.isNotBlank()) putString(KEY_LAST_CONTROL_MAC, scanned.controlMac)
+                if (scanned.otherMac.isNotBlank()) putString(KEY_LAST_OTHER_MAC, scanned.otherMac)
+                apply()
+            }
+            _state.update {
+                it.copy(
+                    lastSavedAddress = scanned.bleAddress,
+                    lastControlMac = scanned.controlMac.ifBlank { it.lastControlMac },
+                    lastOtherMac = scanned.otherMac.ifBlank { it.lastOtherMac }
+                )
+            }
+        }
+
         _state.update {
             it.copy(
                 connecting = true,
@@ -284,17 +459,28 @@ object QcyBleManager {
         val device = runCatching { btAdapter.getRemoteDevice(address) }.getOrNull()
         if (device == null) {
             _state.update { it.copy(connecting = false, statusMessage = "Endereço Bluetooth inválido") }
+            notifyConnectWaiters()
             return
         }
+
+        mainHandler.removeCallbacks(connectWatchdogRunnable)
+        mainHandler.postDelayed(connectWatchdogRunnable, 10_000L)
 
         bluetoothGatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             device.connectGatt(ctx, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
         } else {
             device.connectGatt(ctx, false, gattCallback)
         }
+        if (bluetoothGatt == null) {
+            _state.update { it.copy(connecting = false, statusMessage = "Erro ao abrir GATT") }
+            notifyConnectWaiters()
+        }
     }
 
-    fun disconnect() {
+    fun disconnect(resetPending: Boolean = true) {
+        if (resetPending) {
+            pendingAncTargetMode = null
+        }
         stopFindingEarbuds(sendBleStop = false)
         runCatching {
             bluetoothGatt?.disconnect()
@@ -312,25 +498,55 @@ object QcyBleManager {
                 statusMessage = "Desconectado"
             )
         }
+        if (resetPending) {
+            notifyConnectWaiters()
+        }
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                gattRetryAttempted = false
                 gatt.discoverServices()
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                disconnect()
+                val addr = gatt.device?.address
+                val shouldRetry = status == 133 && !gattRetryAttempted && !addr.isNullOrBlank()
+                if (shouldRetry) {
+                    gattRetryAttempted = true
+                    runCatching { gatt.close() }
+                    bluetoothGatt = null
+                    mainHandler.postDelayed({
+                        val ctx = appContext
+                        val btAdapter = adapter()
+                        val dev = if (ctx != null && btAdapter != null && !addr.isNullOrBlank()) {
+                            runCatching { btAdapter.getRemoteDevice(addr) }.getOrNull()
+                        } else null
+                        if (dev != null && ctx != null) {
+                            bluetoothGatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                dev.connectGatt(ctx, false, this, BluetoothDevice.TRANSPORT_LE)
+                            } else {
+                                dev.connectGatt(ctx, false, this)
+                            }
+                        } else {
+                            disconnect()
+                        }
+                    }, 350L)
+                } else {
+                    disconnect()
+                }
             }
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 _state.update { it.copy(connecting = false, statusMessage = "Falha ao descobrir serviços BLE") }
+                notifyConnectWaiters()
                 return
             }
             val service = gatt.getService(QcyProtocol.SERVICE_UUID)
             if (service == null) {
                 _state.update { it.copy(connecting = false, statusMessage = "Serviço QCY não encontrado") }
+                notifyConnectWaiters()
                 return
             }
 
@@ -362,23 +578,41 @@ object QcyBleManager {
                 )
             }
 
+            appContext?.let { ensureObservingCompanionPresence(it, addr) }
+
             // Read battery after descriptor write settles
             mainHandler.postDelayed({ refreshBatteryAndVersion() }, 250L)
 
             // CRITICAL FEATURE: Auto-enable Sleep Mode (ignore lateral touch controls) on connect
-            if (_state.value.autoSleepOnConnect) {
+            val willAutoSleep = _state.value.autoSleepOnConnect
+            if (willAutoSleep) {
                 mainHandler.postDelayed({
                     setSleepMode(true, isAuto = true)
-                }, 550L)
+                }, 480L)
             }
 
-            // Query current state of LDAC, Dual Connect, Low Latency, and ANC
+            // Execute any queued ANC mode triggered from Quick Settings Tile while disconnected
+            val pendingAnc = pendingAncTargetMode
+            if (pendingAnc != null) {
+                pendingAncTargetMode = null
+                val ancDelay = if (willAutoSleep) 760L else 420L
+                mainHandler.postDelayed({
+                    setAncCycleMode(pendingAnc)
+                    notifyConnectWaiters()
+                }, ancDelay)
+            } else {
+                mainHandler.postDelayed({
+                    notifyConnectWaiters()
+                }, if (willAutoSleep) 680L else 360L)
+            }
+
+            // Query current state of LDAC and Dual Connect
             mainHandler.postDelayed({
                 writeCommand(QcyProtocol.buildRequestDataCommand(0x23))
-            }, 850L)
+            }, 980L)
             mainHandler.postDelayed({
                 writeCommand(QcyProtocol.buildRequestDataCommand(0x24))
-            }, 1050L)
+            }, 1180L)
         }
 
         @Deprecated("Deprecated in Java")
@@ -678,15 +912,18 @@ object QcyBleManager {
 
     fun setAncCmdId(cmdId: Int) {
         val packet = QcyProtocol.buildAncCommand(cmdId)
-        writeCommand(packet)
+        val sent = writeCommand(packet)
         val cycleMode = QcyProtocol.modeFromCmdId(cmdId)
+        appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.edit()?.putString(KEY_ANC_CYCLE_MODE, cycleMode.name)?.apply()
         _state.update {
             it.copy(
                 ancCmdId = cmdId,
                 ancCycleMode = cycleMode,
-                statusMessage = "Modo de ruído: ${cycleMode.label}"
+                statusMessage = if (sent) "Modo de ruído: ${cycleMode.label}" else "Conectando para ${cycleMode.label}..."
             )
         }
+        appContext?.let { QcyAncTileService.requestTileUpdate(it) }
     }
 
     fun setAncCycleMode(mode: AncCycleMode) {
@@ -702,5 +939,126 @@ object QcyBleManager {
         val nextMode = _state.value.ancCycleMode.next()
         setAncCycleMode(nextMode)
         return nextMode
+    }
+
+    /**
+     * Cycles ANC and guarantees delivery even if the app was frozen/disconnected in background:
+     * if GATT isn't connected yet, queues the desired ANC mode, connects immediately, and applies it.
+     */
+    fun cycleAncModeAndEnsureConnected(onFinished: (() -> Unit)? = null): AncCycleMode {
+        val baseMode = pendingAncTargetMode ?: _state.value.ancCycleMode
+        val nextMode = baseMode.next()
+
+        if (_state.value.connected && bluetoothGatt != null && commandChar != null) {
+            val sent = writeCommand(QcyProtocol.buildAncCommand(nextMode.meloBudsCmdId))
+            if (sent) {
+                appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    ?.edit()?.putString(KEY_ANC_CYCLE_MODE, nextMode.name)?.apply()
+                _state.update {
+                    it.copy(
+                        ancCmdId = nextMode.meloBudsCmdId,
+                        ancCycleMode = nextMode,
+                        statusMessage = "Modo de ruído: ${nextMode.label}"
+                    )
+                }
+                onFinished?.invoke()
+                return nextMode
+            }
+            // Stale GATT link; reconnect and apply
+            disconnect(resetPending = false)
+        }
+
+        pendingAncTargetMode = nextMode
+        appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.edit()?.putString(KEY_ANC_CYCLE_MODE, nextMode.name)?.apply()
+        _state.update {
+            it.copy(
+                ancCmdId = nextMode.meloBudsCmdId,
+                ancCycleMode = nextMode,
+                statusMessage = "Conectando para ${nextMode.label}..."
+            )
+        }
+        connectOrAutoScan(onFinished = onFinished)
+        return nextMode
+    }
+
+    fun hasPendingAncCommand(): Boolean = pendingAncTargetMode != null
+
+    fun warmUpIfAudioConnected(context: Context) {
+        init(context)
+        if (_state.value.connected || _state.value.connecting || isScanning) return
+        val btAdapter = adapter() ?: return
+        if (!btAdapter.isEnabled) return
+        if (btAdapter.getProfileConnectionState(BluetoothProfile.A2DP) != BluetoothProfile.STATE_CONNECTED) return
+
+        btAdapter.getProfileProxy(context.applicationContext, object : BluetoothProfile.ServiceListener {
+            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+                val devices = runCatching { proxy.connectedDevices }.getOrDefault(emptyList())
+                val qcyConnected = devices.any { dev -> matchesAnySavedOrQcyName(dev.name, dev.address) }
+                runCatching { btAdapter.closeProfileProxy(profile, proxy) }
+                if (qcyConnected && !_state.value.connected && !_state.value.connecting) {
+                    connectOrAutoScan()
+                }
+            }
+
+            override fun onServiceDisconnected(profile: Int) {}
+        }, BluetoothProfile.A2DP)
+    }
+
+    fun matchesAnySavedOrQcyName(name: String?, address: String?): Boolean {
+        val devName = name.orEmpty()
+        val addr = address.orEmpty()
+        val s = _state.value
+        val byName = devName.contains("QCY", ignoreCase = true) ||
+            devName.contains("MeloBuds", ignoreCase = true)
+        val byAddr = addr.isNotBlank() && (
+            addr.equals(s.lastSavedAddress, ignoreCase = true) ||
+                addr.equals(s.lastControlMac, ignoreCase = true) ||
+                addr.equals(s.lastOtherMac, ignoreCase = true)
+            )
+        return byName || byAddr
+    }
+
+    fun isXiaomiDevice(): Boolean =
+        Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true) ||
+            Build.BRAND.equals("Xiaomi", ignoreCase = true) ||
+            Build.BRAND.equals("POCO", ignoreCase = true) ||
+            Build.BRAND.equals("Redmi", ignoreCase = true)
+
+    fun isIgnoringBatteryOptimizations(context: Context): Boolean {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return true
+        return pm.isIgnoringBatteryOptimizations(context.packageName)
+    }
+
+    fun getCompanionAssociations(context: Context): List<String> {
+        val cdm = context.getSystemService(Context.COMPANION_DEVICE_SERVICE) as? CompanionDeviceManager
+            ?: return emptyList()
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            runCatching {
+                cdm.myAssociations.mapNotNull { it.deviceMacAddress?.toString()?.uppercase() }
+            }.getOrDefault(emptyList())
+        } else {
+            @Suppress("DEPRECATION")
+            runCatching {
+                cdm.associations.map { it.uppercase() }
+            }.getOrDefault(emptyList())
+        }
+    }
+
+    fun ensureObservingCompanionPresence(context: Context, extraMac: String? = null) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val cdm = context.getSystemService(Context.COMPANION_DEVICE_SERVICE) as? CompanionDeviceManager
+            ?: return
+        val associated = getCompanionAssociations(context).toMutableSet()
+        if (!extraMac.isNullOrBlank()) {
+            val normalized = extraMac.uppercase()
+            if (normalized !in associated) {
+                // Only observe addresses already associated with CompanionDeviceManager
+                // (calling startObservingDevicePresence on unassociated MAC throws SecurityException)
+            }
+        }
+        associated.forEach { mac ->
+            runCatching { cdm.startObservingDevicePresence(mac) }
+        }
     }
 }

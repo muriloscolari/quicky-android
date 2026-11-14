@@ -41,7 +41,8 @@ data class QcyAdvertisement(
     val vendorId: Int,
     val modelTitle: String,
     val battery: QcyBattery,
-    val controlMac: String
+    val controlMac: String,
+    val otherMac: String = ""
 )
 
 object QcyProtocol {
@@ -205,11 +206,24 @@ object QcyProtocol {
             data[15].toInt() and 0xFF,
             data[14].toInt() and 0xFF
         )
+        val otherMac = if (data.size >= 24) {
+            "%02X:%02X:%02X:%02X:%02X:%02X".format(
+                data[19].toInt() and 0xFF,
+                data[18].toInt() and 0xFF,
+                data[20].toInt() and 0xFF,
+                data[23].toInt() and 0xFF,
+                data[22].toInt() and 0xFF,
+                data[21].toInt() and 0xFF
+            ).takeUnless { it == "00:00:00:00:00:00" }.orEmpty()
+        } else {
+            ""
+        }
         return QcyAdvertisement(
             vendorId = vendorId,
             modelTitle = modelTitleForVendor(vendorId),
             battery = battery,
-            controlMac = controlMac
+            controlMac = controlMac,
+            otherMac = otherMac
         )
     }
 }
