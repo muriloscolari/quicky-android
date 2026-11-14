@@ -1030,6 +1030,37 @@ object QcyBleManager {
         return pm.isIgnoringBatteryOptimizations(context.packageName)
     }
 
+    fun getBondedQcyCandidates(context: Context): List<BluetoothDevice> {
+        val btAdapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+            ?: return emptyList()
+        val bonded = runCatching { btAdapter.bondedDevices.orEmpty() }.getOrDefault(emptyList())
+        if (bonded.isEmpty()) return emptyList()
+
+        val directMatches = bonded.filter { dev ->
+            val name = runCatching { dev.name.orEmpty() }.getOrDefault("")
+            matchesAnySavedOrQcyName(name, dev.address)
+        }
+        if (directMatches.isNotEmpty()) return directMatches
+
+        return bonded.filter { dev ->
+            val major = runCatching { dev.bluetoothClass?.majorDeviceClass }.getOrNull()
+            major == android.bluetooth.BluetoothClass.Device.Major.AUDIO_VIDEO
+        }
+    }
+
+    fun getLinkedCompanionDisplayName(context: Context): String? {
+        val associated = getCompanionAssociations(context)
+        if (associated.isEmpty()) return null
+        val btAdapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+        val bonded = runCatching { btAdapter?.bondedDevices.orEmpty() }.getOrDefault(emptyList())
+        for (mac in associated) {
+            val match = bonded.firstOrNull { it.address.equals(mac, ignoreCase = true) }
+            val name = runCatching { match?.name }.getOrNull()
+            if (!name.isNullOrBlank()) return name
+        }
+        return _state.value.modelTitle
+    }
+
     fun getCompanionAssociations(context: Context): List<String> {
         val cdm = context.getSystemService(Context.COMPANION_DEVICE_SERVICE) as? CompanionDeviceManager
             ?: return emptyList()

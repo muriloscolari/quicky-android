@@ -1,11 +1,13 @@
 package me.muriloscolari.quicky
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.bluetooth.le.ScanFilter
 import android.companion.AssociationRequest
 import android.companion.BluetoothDeviceFilter
 import android.companion.BluetoothLeDeviceFilter
 import android.companion.CompanionDeviceManager
+import java.util.regex.Pattern
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -268,6 +270,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun requestCompanionAssociation(onStatus: (String) -> Unit) {
         val cdm = getSystemService(Context.COMPANION_DEVICE_SERVICE) as? CompanionDeviceManager
         if (cdm == null) {
@@ -275,27 +278,43 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        // Release active GATT link briefly so the earbuds also advertise BLE if needed,
-        // while BluetoothDeviceFilter immediately lists already-bonded/connected earbuds.
-        if (QcyBleManager.state.value.connected) {
-            QcyBleManager.disconnect(resetPending = false)
-        }
+        val bondedCandidates = QcyBleManager.getBondedQcyCandidates(this)
+        val requestBuilder = AssociationRequest.Builder()
 
-        val classicFilter = BluetoothDeviceFilter.Builder().build()
-
-        val bleFilter = BluetoothLeDeviceFilter.Builder()
-            .setScanFilter(
-                ScanFilter.Builder()
-                    .setManufacturerData(QcyProtocol.COMPANY_ID_QCY, byteArrayOf())
+        if (bondedCandidates.isNotEmpty()) {
+            // Filter strictly to paired QCY/audio Classic Bluetooth devices so the system dialog
+            // shows their friendly name (e.g. "QCY MeloBuds Pro") instead of raw nameless BLE MACs.
+            bondedCandidates.forEach { dev ->
+                requestBuilder.addDeviceFilter(
+                    BluetoothDeviceFilter.Builder()
+                        .setAddress(dev.address)
+                        .build()
+                )
+            }
+            requestBuilder.setSingleDevice(bondedCandidates.size == 1)
+        } else {
+            // Fallback when not bonded yet: filter by QCY/MeloBuds name + QCY BLE manufacturer data
+            if (QcyBleManager.state.value.connected) {
+                QcyBleManager.disconnect(resetPending = false)
+            }
+            requestBuilder.addDeviceFilter(
+                BluetoothDeviceFilter.Builder()
+                    .setNamePattern(Pattern.compile(".*(QCY|MeloBuds).*", Pattern.CASE_INSENSITIVE))
                     .build()
             )
-            .build()
+            requestBuilder.addDeviceFilter(
+                BluetoothLeDeviceFilter.Builder()
+                    .setScanFilter(
+                        ScanFilter.Builder()
+                            .setManufacturerData(QcyProtocol.COMPANY_ID_QCY, byteArrayOf())
+                            .build()
+                    )
+                    .build()
+            )
+            requestBuilder.setSingleDevice(false)
+        }
 
-        val request = AssociationRequest.Builder()
-            .addDeviceFilter(classicFilter)
-            .addDeviceFilter(bleFilter)
-            .setSingleDevice(false)
-            .build()
+        val request = requestBuilder.build()
 
         val callback = object : CompanionDeviceManager.Callback() {
             override fun onAssociationPending(intentSender: IntentSender) {
