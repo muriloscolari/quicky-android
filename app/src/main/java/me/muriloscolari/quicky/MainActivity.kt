@@ -36,6 +36,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import me.muriloscolari.quicky.ble.QcyBleManager
 import me.muriloscolari.quicky.ble.QcyProtocol
@@ -62,6 +63,9 @@ class MainActivity : ComponentActivity() {
     ) {
         QcyBleManager.ensureObservingCompanionPresence(applicationContext)
         onBackgroundPermissionRefresh?.invoke()
+        if (!QcyBleManager.state.value.connected && !QcyBleManager.state.value.connecting) {
+            QcyBleManager.connectOrAutoScan()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -171,9 +175,11 @@ class MainActivity : ComponentActivity() {
                     onRequestBatteryUnrestricted = { openBatteryOptimizationSettings() },
                     onRequestCompanionLink = {
                         companionStatusNote = "Procurando fone QCY próximo (retire do estojo)..."
-                        requestCompanionAssociation { note ->
-                            companionStatusNote = note
-                            refreshBgState()
+                        scope.launch {
+                            requestCompanionAssociation { note ->
+                                companionStatusNote = note
+                                refreshBgState()
+                            }
                         }
                     },
                     onOpenXiaomiAutostart = { openXiaomiAutostartSettings() },
@@ -271,48 +277,84 @@ class MainActivity : ComponentActivity() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun requestCompanionAssociation(onStatus: (String) -> Unit) {
+    private suspend fun requestCompanionAssociation(onStatus: (String) -> Unit) {
         val cdm = getSystemService(Context.COMPANION_DEVICE_SERVICE) as? CompanionDeviceManager
         if (cdm == null) {
             onStatus("CompanionDeviceManager indisponível neste aparelho")
             return
         }
 
-        val bondedCandidates = QcyBleManager.getBondedQcyCandidates(this)
+        // If we haven't seen the QCY BLE MAC yet, run a quick software BLE scan to capture it
+        if (QcyBleManager.getKnownBleAddress() == null) {
+            QcyBleManager.startScan(durationMs = 2000L, connectImmediatelyOnMatch = false)
+            val startMs = System.currentTimeMillis()
+            while (QcyBleManager.getKnownBleAddress() == null && System.currentTimeMillis() - startMs < 1800L) {
+                delay(100L)
+            }
+            QcyBleManager.stopScan()
+        }
+
+        val bleMac = QcyBleManager.getKnownBleAddress()
+        val primaryBonded = QcyBleManager.getPrimaryBondedQcyDevice(this)
+
+        // Release active BLE GATT connection so the earbuds broadcast BLE advertisements
+        // (required on Xiaomi HyperOS where CompanionDeviceManager scans live BLE packets).
+        if (QcyBleManager.state.value.connected || QcyBleManager.state.value.connecting) {
+            QcyBleManager.disconnect(resetPending = false)
+            delay(350L)
+        }
+
+        val rawFriendly = primaryBonded?.let { runCatching { it.name }.getOrNull() }
+            ?.takeIf { it.isNotBlank() }
+            ?: QcyBleManager.state.value.modelTitle.ifBlank { "QCY MeloBuds Pro" }
+        val cleanModel = rawFriendly
+            .replace(Regex("^QCY\\s*", RegexOption.IGNORE_CASE), "")
+            .trim()
+            .ifBlank { "MeloBuds Pro" }
+
         val requestBuilder = AssociationRequest.Builder()
 
-        if (bondedCandidates.isNotEmpty()) {
-            // Filter strictly to paired QCY/audio Classic Bluetooth devices so the system dialog
-            // shows their friendly name (e.g. "QCY MeloBuds Pro") instead of raw nameless BLE MACs.
-            bondedCandidates.forEach { dev ->
-                requestBuilder.addDeviceFilter(
-                    BluetoothDeviceFilter.Builder()
-                        .setAddress(dev.address)
-                        .build()
-                )
-            }
-            requestBuilder.setSingleDevice(bondedCandidates.size == 1)
+        // 1. Classic Bluetooth filter for the primary bonded QCY device (matches immediately on Samsung)
+        if (primaryBonded != null) {
+            requestBuilder.addDeviceFilter(
+                BluetoothDeviceFilter.Builder()
+                    .setAddress(primaryBonded.address)
+                    .build()
+            )
         } else {
-            // Fallback when not bonded yet: filter by QCY/MeloBuds name + QCY BLE manufacturer data
-            if (QcyBleManager.state.value.connected) {
-                QcyBleManager.disconnect(resetPending = false)
-            }
             requestBuilder.addDeviceFilter(
                 BluetoothDeviceFilter.Builder()
                     .setNamePattern(Pattern.compile(".*(QCY|MeloBuds).*", Pattern.CASE_INSENSITIVE))
                     .build()
             )
+        }
+
+        // 2. BLE filter(s) with friendly display name ("QCY: MeloBuds Pro") so Xiaomi HyperOS
+        // matches the live BLE advertisement and displays the model name instead of a raw MAC.
+        if (!bleMac.isNullOrBlank()) {
             requestBuilder.addDeviceFilter(
                 BluetoothLeDeviceFilter.Builder()
                     .setScanFilter(
                         ScanFilter.Builder()
-                            .setManufacturerData(QcyProtocol.COMPANY_ID_QCY, byteArrayOf())
+                            .setDeviceAddress(bleMac)
                             .build()
                     )
+                    .setRenameFromName("QCY", " $cleanModel", 2, 1)
                     .build()
             )
-            requestBuilder.setSingleDevice(false)
         }
+        requestBuilder.addDeviceFilter(
+            BluetoothLeDeviceFilter.Builder()
+                .setScanFilter(
+                    ScanFilter.Builder()
+                        .setManufacturerData(QcyProtocol.COMPANY_ID_QCY, byteArrayOf())
+                        .build()
+                )
+                .setRenameFromName("QCY", " $cleanModel", 2, 1)
+                .build()
+        )
+
+        requestBuilder.setSingleDevice(true)
 
         val request = requestBuilder.build()
 
@@ -323,6 +365,7 @@ class MainActivity : ComponentActivity() {
                         companionLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
                     }.onFailure {
                         onStatus("Falha ao abrir diálogo de vínculo: ${it.message}")
+                        QcyBleManager.connectOrAutoScan()
                     }
                 }
             }
@@ -335,6 +378,9 @@ class MainActivity : ComponentActivity() {
             override fun onFailure(error: CharSequence?) {
                 runOnUiThread {
                     onStatus(error?.toString()?.takeIf { it.isNotBlank() } ?: "Nenhum fone QCY encontrado para vincular")
+                    if (!QcyBleManager.state.value.connected && !QcyBleManager.state.value.connecting) {
+                        QcyBleManager.connectOrAutoScan()
+                    }
                 }
             }
         }
@@ -347,6 +393,9 @@ class MainActivity : ComponentActivity() {
             }
         }.onFailure {
             onStatus("Erro ao iniciar vínculo: ${it.message}")
+            if (!QcyBleManager.state.value.connected && !QcyBleManager.state.value.connecting) {
+                QcyBleManager.connectOrAutoScan()
+            }
         }
     }
 }

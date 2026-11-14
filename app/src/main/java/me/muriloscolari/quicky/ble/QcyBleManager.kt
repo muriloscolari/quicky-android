@@ -1030,6 +1030,35 @@ object QcyBleManager {
         return pm.isIgnoringBatteryOptimizations(context.packageName)
     }
 
+    fun getKnownBleAddress(): String? {
+        val s = _state.value
+        return s.connectedAddress?.takeIf { it.isNotBlank() }
+            ?: s.lastSavedAddress.takeIf { it.isNotBlank() }
+            ?: s.devices.firstOrNull()?.bleAddress?.takeIf { it.isNotBlank() }
+    }
+
+    fun isDeviceConnected(device: BluetoothDevice): Boolean =
+        runCatching {
+            val method = device.javaClass.getMethod("isConnected")
+            method.invoke(device) as? Boolean ?: false
+        }.getOrDefault(false)
+
+    fun getPrimaryBondedQcyDevice(context: Context): BluetoothDevice? {
+        val candidates = getBondedQcyCandidates(context)
+        if (candidates.isEmpty()) return null
+        val s = _state.value
+        return candidates.firstOrNull { dev ->
+            !runCatching { dev.name }.getOrNull().isNullOrBlank() && isDeviceConnected(dev)
+        } ?: candidates.firstOrNull { dev ->
+            !runCatching { dev.name }.getOrNull().isNullOrBlank() && (
+                dev.address.equals(s.lastControlMac, ignoreCase = true) ||
+                    dev.address.equals(s.lastOtherMac, ignoreCase = true)
+                )
+        } ?: candidates.firstOrNull { dev ->
+            !runCatching { dev.name }.getOrNull().isNullOrBlank()
+        } ?: candidates.first()
+    }
+
     fun getBondedQcyCandidates(context: Context): List<BluetoothDevice> {
         val btAdapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
             ?: return emptyList()
