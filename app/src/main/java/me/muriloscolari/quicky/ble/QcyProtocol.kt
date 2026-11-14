@@ -28,6 +28,37 @@ enum class FindEarbudSide(val label: String, val leftGain: Float, val rightGain:
     RIGHT("Direito", 0f, 1f)
 }
 
+enum class QcyKeyId(val keyId: Int, val label: String, val defaultFuncId: Int) {
+    LEFT_SINGLE(0x01, "1 toque · Esquerdo", 0x00),
+    RIGHT_SINGLE(0x02, "1 toque · Direito", 0x00),
+    LEFT_DOUBLE(0x03, "2 toques · Esquerdo", 0x01),
+    RIGHT_DOUBLE(0x04, "2 toques · Direito", 0x01),
+    LEFT_TRIPLE(0x05, "3 toques · Esquerdo", 0x04),
+    RIGHT_TRIPLE(0x06, "3 toques · Direito", 0x03),
+    LEFT_LONG(0x09, "Segurar · Esquerdo", 0x07),
+    RIGHT_LONG(0x0A, "Segurar · Direito", 0x0B)
+}
+
+enum class QcyKeyAction(val funcId: Int, val label: String) {
+    NONE(0x00, "Desativado"),
+    PLAY_PAUSE(0x01, "Play / Pause"),
+    PREVIOUS(0x02, "Faixa anterior"),
+    NEXT(0x03, "Próxima faixa"),
+    VOICE_ASSISTANT(0x04, "Assistente de voz"),
+    VOLUME_UP(0x05, "Aumentar volume"),
+    VOLUME_DOWN(0x06, "Diminuir volume"),
+    GAME_MODE(0x07, "Modo Jogo"),
+    ANC_MODE(0x0B, "Modo ANC");
+
+    companion object {
+        fun fromFuncId(funcId: Int?): QcyKeyAction? =
+            entries.firstOrNull { it.funcId == funcId }
+
+        fun labelFor(funcId: Int?, fallback: String = "Desconhecido"): String =
+            fromFuncId(funcId)?.label ?: fallback
+    }
+}
+
 data class QcyBattery(
     val left: Int = -1,
     val right: Int = -1,
@@ -52,6 +83,7 @@ object QcyProtocol {
     val SERVICE_UUID: UUID = UUID.fromString("0000a001-0000-1000-8000-00805f9b34fb")
     val COMMAND_UUID: UUID = UUID.fromString("00001001-0000-1000-8000-00805f9b34fb")
     val NOTIFY_UUID: UUID = UUID.fromString("00001002-0000-1000-8000-00805f9b34fb")
+    val KEY_FUNC_UUID: UUID = UUID.fromString("0000000d-0000-1000-8000-00805f9b34fb")
     val VERSION_UUID: UUID = UUID.fromString("00000007-0000-1000-8000-00805f9b34fb")
     val BATTERY_UUID: UUID = UUID.fromString("00000008-0000-1000-8000-00805f9b34fb")
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
@@ -156,6 +188,32 @@ object QcyProtocol {
         cmdId == 0 || cmdId == 131072 -> AncCycleMode.OFF
         cmdId == 3 || cmdId in 196864..196870 -> AncCycleMode.AMBIENT
         else -> AncCycleMode.ANC
+    }
+
+    /**
+     * Key Function direct write payload (characteristic 0000000D, without 0xFF framing):
+     * [keyId1, funcId1, keyId2, funcId2, ...]
+     */
+    fun buildKeyFunctionData(pairs: List<Pair<Int, Int>>): ByteArray {
+        val out = ByteArray(pairs.size * 2)
+        pairs.forEachIndexed { idx, (keyId, funcId) ->
+            out[idx * 2] = (keyId and 0xFF).toByte()
+            out[idx * 2 + 1] = (funcId and 0xFF).toByte()
+        }
+        return out
+    }
+
+    fun parseKeyFunctionPairs(bytes: ByteArray?): Map<Int, Int> {
+        if (bytes == null || bytes.size < 2) return emptyMap()
+        val out = LinkedHashMap<Int, Int>(bytes.size / 2)
+        var i = 0
+        while (i + 1 < bytes.size) {
+            val keyId = bytes[i].toInt() and 0xFF
+            val funcId = bytes[i + 1].toInt() and 0xFF
+            out[keyId] = funcId
+            i += 2
+        }
+        return out
     }
 
     fun parseBatteryBytes(bytes: ByteArray?): QcyBattery? {

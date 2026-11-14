@@ -9,6 +9,7 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
@@ -63,6 +64,7 @@ data class QcyUiState(
     val lowLatencyEnabled: Boolean = false,
     val ldacEnabled: Boolean = false,
     val dualConnectEnabled: Boolean = false,
+    val keyMappings: Map<Int, Int> = emptyMap(),
     val notificationsEnabled: Boolean = false,
     val findingSide: FindEarbudSide? = null,
     val uiStyle: UiStyle = UiStyle.XIAOMI_HYPEROS,
@@ -95,14 +97,47 @@ object QcyBleManager {
     private var appContext: Context? = null
     private var bluetoothGatt: BluetoothGatt? = null
     private var commandChar: BluetoothGattCharacteristic? = null
+    private var keyFuncChar: BluetoothGattCharacteristic? = null
     private var batteryChar: BluetoothGattCharacteristic? = null
     private var versionChar: BluetoothGattCharacteristic? = null
     private var isScanning = false
     private val scannedMap = LinkedHashMap<String, ScannedQcyDevice>()
 
+    private sealed class GattOp {
+        abstract val onDone: ((Boolean) -> Unit)?
+
+        data class WriteDescriptor(
+            val descriptor: BluetoothGattDescriptor,
+            val value: ByteArray,
+            override val onDone: ((Boolean) -> Unit)? = null
+        ) : GattOp()
+
+        data class ReadChar(
+            val characteristic: BluetoothGattCharacteristic,
+            override val onDone: ((Boolean) -> Unit)? = null
+        ) : GattOp()
+
+        data class WriteChar(
+            val characteristic: BluetoothGattCharacteristic,
+            val value: ByteArray,
+            val retryOnBusy: Boolean = true,
+            override val onDone: ((Boolean) -> Unit)? = null
+        ) : GattOp()
+    }
+
+    private val gattOpQueue = ArrayDeque<GattOp>()
+    private var currentGattOp: GattOp? = null
+    private val gattOpTimeoutRunnable = Runnable {
+        val timedOut = currentGattOp
+        currentGattOp = null
+        timedOut?.onDone?.invoke(false)
+        pumpGattQueue()
+    }
+
     private var fastAutoConnectTarget: String? = null
     private var pendingAncTargetMode: AncCycleMode? = null
     private var gattRetryAttempted = false
+    private var autoSleepVerifyRetries = 0
     private var wakeLock: PowerManager.WakeLock? = null
     private val pendingConnectCallbacks = mutableListOf<() -> Unit>()
     private val scanTimeoutRunnable = Runnable { onScanTimeoutReached() }
@@ -397,6 +432,117 @@ object QcyBleManager {
         }
     }
 
+    private fun enqueueGattOp(op: GattOp) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { enqueueGattOp(op) }
+            return
+        }
+        gattOpQueue.addLast(op)
+        if (currentGattOp == null) {
+            pumpGattQueue()
+        }
+    }
+
+    private fun clearGattQueue(notifyFailure: Boolean = false) {
+        mainHandler.removeCallbacks(gattOpTimeoutRunnable)
+        val inFlight = currentGattOp
+        currentGattOp = null
+        val pending = gattOpQueue.toList()
+        gattOpQueue.clear()
+        if (notifyFailure) {
+            inFlight?.onDone?.invoke(false)
+            pending.forEach { it.onDone?.invoke(false) }
+        }
+    }
+
+    private fun completeCurrentGattOp(success: Boolean) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { completeCurrentGattOp(success) }
+            return
+        }
+        mainHandler.removeCallbacks(gattOpTimeoutRunnable)
+        val op = currentGattOp
+        currentGattOp = null
+        op?.onDone?.invoke(success)
+        pumpGattQueue()
+    }
+
+    private fun pumpGattQueue() {
+        if (currentGattOp != null) return
+        val gatt = bluetoothGatt
+        if (gatt == null) {
+            clearGattQueue(notifyFailure = true)
+            return
+        }
+        val next = gattOpQueue.removeFirstOrNull() ?: return
+        currentGattOp = next
+        mainHandler.postDelayed(gattOpTimeoutRunnable, 900L)
+
+        when (next) {
+            is GattOp.WriteDescriptor -> {
+                val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    gatt.writeDescriptor(next.descriptor, next.value) == BluetoothStatusCodes.SUCCESS
+                } else {
+                    @Suppress("DEPRECATION")
+                    run {
+                        next.descriptor.value = next.value
+                        gatt.writeDescriptor(next.descriptor)
+                    }
+                }
+                if (!started) {
+                    completeCurrentGattOp(false)
+                }
+            }
+            is GattOp.ReadChar -> {
+                val started = runCatching { gatt.readCharacteristic(next.characteristic) }.getOrDefault(false)
+                if (!started) {
+                    completeCurrentGattOp(false)
+                }
+            }
+            is GattOp.WriteChar -> {
+                val char = next.characteristic
+                val canNoResp = (char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                val writeType = if (canNoResp) {
+                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                } else {
+                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                }
+                var isBusy = false
+                val started = runCatching {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        val res = gatt.writeCharacteristic(char, next.value, writeType)
+                        if (res == BluetoothStatusCodes.ERROR_GATT_WRITE_REQUEST_BUSY) {
+                            isBusy = true
+                            false
+                        } else {
+                            res == BluetoothStatusCodes.SUCCESS
+                        }
+                    } else {
+                        @Suppress("DEPRECATION")
+                        run {
+                            char.writeType = writeType
+                            char.value = next.value
+                            val ok = gatt.writeCharacteristic(char)
+                            if (!ok) isBusy = true
+                            ok
+                        }
+                    }
+                }.getOrDefault(false)
+
+                if (!started) {
+                    if (isBusy && next.retryOnBusy) {
+                        mainHandler.removeCallbacks(gattOpTimeoutRunnable)
+                        currentGattOp = null
+                        gattOpQueue.addFirst(next.copy(retryOnBusy = false))
+                        mainHandler.postDelayed({ pumpGattQueue() }, 90L)
+                    } else {
+                        completeCurrentGattOp(false)
+                    }
+                }
+            }
+        }
+    }
+
     fun connectOrAutoScan(preferredAddress: String? = null, onFinished: (() -> Unit)? = null) {
         if (onFinished != null) {
             synchronized(pendingConnectCallbacks) {
@@ -404,7 +550,7 @@ object QcyBleManager {
             }
         }
         if (_state.value.connected && bluetoothGatt != null && commandChar != null) {
-            notifyConnectWaiters()
+            ensureAutoSleepIfNeeded()
             return
         }
         acquireShortWakeLock(12_000L)
@@ -419,6 +565,27 @@ object QcyBleManager {
             startScan(durationMs = 4_000L, autoConnectTarget = target, connectImmediatelyOnMatch = true)
         } else {
             startScan(durationMs = 6_000L, autoConnectTarget = "", connectImmediatelyOnMatch = true)
+        }
+    }
+
+    /**
+     * When classic BT Audio (A2DP/HFP) finishes connecting while GATT was already open,
+     * re-verify/enforce Sleep Mode so touch controls never stay unlocked on connect.
+     */
+    fun ensureAutoSleepIfNeeded() {
+        if (!_state.value.connected || bluetoothGatt == null || commandChar == null) {
+            notifyConnectWaiters()
+            return
+        }
+        if (!_state.value.autoSleepOnConnect) {
+            notifyConnectWaiters()
+            return
+        }
+        autoSleepVerifyRetries = 0
+        acquireShortWakeLock(6_000L)
+        setSleepMode(true, isAuto = true)
+        writeCommand(QcyProtocol.buildRequestDataCommand(0x10)) {
+            mainHandler.postDelayed({ notifyConnectWaiters() }, 250L)
         }
     }
 
@@ -481,6 +648,8 @@ object QcyBleManager {
         if (resetPending) {
             pendingAncTargetMode = null
         }
+        clearGattQueue(notifyFailure = false)
+        autoSleepVerifyRetries = 0
         stopFindingEarbuds(sendBleStop = false)
         runCatching {
             bluetoothGatt?.disconnect()
@@ -488,6 +657,7 @@ object QcyBleManager {
         }
         bluetoothGatt = null
         commandChar = null
+        keyFuncChar = null
         batteryChar = null
         versionChar = null
         _state.update {
@@ -551,18 +721,13 @@ object QcyBleManager {
             }
 
             commandChar = service.getCharacteristic(QcyProtocol.COMMAND_UUID)
+            keyFuncChar = service.getCharacteristic(QcyProtocol.KEY_FUNC_UUID)
             batteryChar = service.getCharacteristic(QcyProtocol.BATTERY_UUID)
             versionChar = service.getCharacteristic(QcyProtocol.VERSION_UUID)
             val notifyChar = service.getCharacteristic(QcyProtocol.NOTIFY_UUID)
 
-            if (notifyChar != null) {
-                gatt.setCharacteristicNotification(notifyChar, true)
-                val desc = notifyChar.getDescriptor(QcyProtocol.CCCD_UUID)
-                if (desc != null) {
-                    desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                    gatt.writeDescriptor(desc)
-                }
-            }
+            clearGattQueue(notifyFailure = false)
+            autoSleepVerifyRetries = 0
 
             val addr = gatt.device.address ?: ""
             appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -580,39 +745,102 @@ object QcyBleManager {
 
             appContext?.let { ensureObservingCompanionPresence(it, addr) }
 
-            // Read battery after descriptor write settles
-            mainHandler.postDelayed({ refreshBatteryAndVersion() }, 250L)
+            // 1. Enable BLE notifications (serialized so mDeviceBusy never blocks writes)
+            if (notifyChar != null) {
+                gatt.setCharacteristicNotification(notifyChar, true)
+                val desc = notifyChar.getDescriptor(QcyProtocol.CCCD_UUID)
+                if (desc != null) {
+                    enqueueGattOp(
+                        GattOp.WriteDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                    )
+                }
+            }
 
-            // CRITICAL FEATURE: Auto-enable Sleep Mode (ignore lateral touch controls) on connect
+            // 2. Read battery & firmware sequentially
+            batteryChar?.let { enqueueGattOp(GattOp.ReadChar(it)) }
+            versionChar?.let { enqueueGattOp(GattOp.ReadChar(it)) }
+
+            // 3. CRITICAL FEATURE: Auto-enable Sleep Mode (ignore lateral touch controls) on connect
             val willAutoSleep = _state.value.autoSleepOnConnect
-            if (willAutoSleep) {
-                mainHandler.postDelayed({
-                    setSleepMode(true, isAuto = true)
-                }, 480L)
-            }
-
-            // Execute any queued ANC mode triggered from Quick Settings Tile while disconnected
             val pendingAnc = pendingAncTargetMode
-            if (pendingAnc != null) {
-                pendingAncTargetMode = null
-                val ancDelay = if (willAutoSleep) 760L else 420L
-                mainHandler.postDelayed({
-                    setAncCycleMode(pendingAnc)
-                    notifyConnectWaiters()
-                }, ancDelay)
-            } else {
-                mainHandler.postDelayed({
-                    notifyConnectWaiters()
-                }, if (willAutoSleep) 680L else 360L)
+            pendingAncTargetMode = null
+
+            if (willAutoSleep) {
+                commandChar?.let { cChar ->
+                    enqueueGattOp(
+                        GattOp.WriteChar(cChar, QcyProtocol.buildSleepModeCommand(true)) { sent ->
+                            _state.update {
+                                it.copy(
+                                    sleepModeEnabled = if (sent) true else it.sleepModeEnabled,
+                                    statusMessage = if (sent) {
+                                        "Toques na lateral bloqueados automaticamente (Modo Sono)"
+                                    } else {
+                                        it.statusMessage
+                                    }
+                                )
+                            }
+                            if (pendingAnc == null) {
+                                mainHandler.postDelayed({ notifyConnectWaiters() }, 250L)
+                            }
+                        }
+                    )
+                }
             }
 
-            // Query current state of LDAC and Dual Connect
+            // 4. Execute any queued ANC mode triggered from Quick Settings Tile while disconnected
+            if (pendingAnc != null) {
+                commandChar?.let { cChar ->
+                    val packet = QcyProtocol.buildAncCommand(pendingAnc.meloBudsCmdId)
+                    enqueueGattOp(
+                        GattOp.WriteChar(cChar, packet) { sent ->
+                            if (sent) {
+                                appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                                    ?.edit()?.putString(KEY_ANC_CYCLE_MODE, pendingAnc.name)?.apply()
+                                _state.update {
+                                    it.copy(
+                                        ancCmdId = pendingAnc.meloBudsCmdId,
+                                        ancCycleMode = pendingAnc,
+                                        statusMessage = "Modo de ruído: ${pendingAnc.label}"
+                                    )
+                                }
+                            }
+                            mainHandler.postDelayed({ notifyConnectWaiters() }, 250L)
+                        }
+                    )
+                }
+            } else if (!willAutoSleep) {
+                mainHandler.postDelayed({ notifyConnectWaiters() }, 300L)
+            }
+
+            // 5. Query current state (Sleep Mode verification, ANC, Low Latency, LDAC, Dual Connect, Key Functions)
+            listOf(0x10, 0x17, 0x09, 0x23, 0x24, 0x2B).forEach { cmd ->
+                commandChar?.let { cChar ->
+                    enqueueGattOp(GattOp.WriteChar(cChar, QcyProtocol.buildRequestDataCommand(cmd)))
+                }
+            }
+
+            // 6. Follow-up verification 1.4s after connect (after A2DP/HFP audio finishes negotiating)
             mainHandler.postDelayed({
-                writeCommand(QcyProtocol.buildRequestDataCommand(0x23))
-            }, 980L)
-            mainHandler.postDelayed({
-                writeCommand(QcyProtocol.buildRequestDataCommand(0x24))
-            }, 1180L)
+                if (_state.value.connected && _state.value.autoSleepOnConnect) {
+                    writeCommand(QcyProtocol.buildRequestDataCommand(0x10))
+                }
+            }, 1_400L)
+        }
+
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            completeCurrentGattOp(status == BluetoothGatt.GATT_SUCCESS)
+        }
+
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            completeCurrentGattOp(status == BluetoothGatt.GATT_SUCCESS)
         }
 
         @Deprecated("Deprecated in Java")
@@ -622,8 +850,10 @@ object QcyBleManager {
             status: Int
         ) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
+                @Suppress("DEPRECATION")
                 handleCharacteristicBytes(characteristic.uuid, characteristic.value)
             }
+            completeCurrentGattOp(status == BluetoothGatt.GATT_SUCCESS)
         }
 
         override fun onCharacteristicRead(
@@ -635,6 +865,7 @@ object QcyBleManager {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 handleCharacteristicBytes(characteristic.uuid, value)
             }
+            completeCurrentGattOp(status == BluetoothGatt.GATT_SUCCESS)
         }
 
         @Deprecated("Deprecated in Java")
@@ -659,13 +890,6 @@ object QcyBleManager {
             QcyProtocol.BATTERY_UUID -> {
                 val parsed = QcyProtocol.parseBatteryBytes(bytes) ?: return
                 _state.update { it.copy(battery = parsed) }
-                mainHandler.postDelayed({
-                    val vChar = versionChar
-                    val gatt = bluetoothGatt
-                    if (vChar != null && gatt != null) {
-                        gatt.readCharacteristic(vChar)
-                    }
-                }, 150L)
             }
             QcyProtocol.VERSION_UUID -> {
                 val ver = QcyProtocol.parseVersionBytes(bytes) ?: return
@@ -695,6 +919,15 @@ object QcyBleManager {
                 0x10 -> if (paramLen >= 1) {
                     val enabled = (bytes[paramStart].toInt() and 0xFF) == 0x01
                     _state.update { it.copy(sleepModeEnabled = enabled) }
+                    if (!enabled && _state.value.connected && _state.value.autoSleepOnConnect && autoSleepVerifyRetries < 3) {
+                        autoSleepVerifyRetries++
+                        mainHandler.postDelayed({
+                            if (_state.value.connected && _state.value.autoSleepOnConnect) {
+                                setSleepMode(true, isAuto = true)
+                                writeCommand(QcyProtocol.buildRequestDataCommand(0x10))
+                            }
+                        }, 180L)
+                    }
                 }
                 0x17 -> if (paramLen >= 3) {
                     val mode = bytes[paramStart].toInt() and 0xFF
@@ -712,6 +945,16 @@ object QcyBleManager {
                     val enabled = (bytes[paramStart].toInt() and 0xFF) == 0x01
                     _state.update { it.copy(dualConnectEnabled = enabled) }
                 }
+                0x2B -> if (paramLen >= 2) {
+                    val pairs = QcyProtocol.parseKeyFunctionPairs(
+                        bytes.copyOfRange(paramStart, paramStart + paramLen)
+                    )
+                    if (pairs.isNotEmpty()) {
+                        _state.update { st ->
+                            st.copy(keyMappings = st.keyMappings + pairs)
+                        }
+                    }
+                }
                 0x2F -> if (paramLen >= 3) {
                     val bat = QcyProtocol.parseBatteryBytes(bytes.copyOfRange(paramStart, paramStart + 3))
                     if (bat != null) {
@@ -724,35 +967,84 @@ object QcyBleManager {
     }
 
     fun refreshBatteryAndVersion() {
-        val gatt = bluetoothGatt ?: return
-        val bChar = batteryChar ?: return
-        runCatching { gatt.readCharacteristic(bChar) }
+        batteryChar?.let { enqueueGattOp(GattOp.ReadChar(it)) }
+        versionChar?.let { enqueueGattOp(GattOp.ReadChar(it)) }
+        writeCommand(QcyProtocol.buildRequestDataCommand(0x10))
+        writeCommand(QcyProtocol.buildRequestDataCommand(0x2B))
     }
 
-    private fun writeCommand(packet: ByteArray): Boolean {
+    private fun writeCommand(packet: ByteArray, onDone: ((Boolean) -> Unit)? = null): Boolean {
         val gatt = bluetoothGatt ?: return false
         val char = commandChar ?: return false
-        return runCatching {
-            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-            char.value = packet
-            gatt.writeCharacteristic(char)
-        }.getOrDefault(false)
+        enqueueGattOp(GattOp.WriteChar(char, packet, onDone = onDone))
+        return true
+    }
+
+    fun setKeyMapping(keyId: Int, funcId: Int) {
+        val gatt = bluetoothGatt
+        val kChar = keyFuncChar
+        if (!_state.value.connected || gatt == null || kChar == null) {
+            _state.update {
+                it.copy(
+                    statusMessage = if (!_state.value.connected) {
+                        "Conecte o fone para alterar toques"
+                    } else {
+                        "Característica de toques indisponível neste fone"
+                    }
+                )
+            }
+            return
+        }
+
+        val payload = QcyProtocol.buildKeyFunctionData(listOf(keyId to funcId))
+        val actionLabel = QcyKeyAction.labelFor(funcId)
+        val keyLabel = QcyKeyId.entries.firstOrNull { it.keyId == keyId }?.label ?: "Tecla 0x%02X".format(keyId)
+
+        enqueueGattOp(
+            GattOp.WriteChar(kChar, payload) { sent ->
+                if (sent) {
+                    _state.update { st ->
+                        st.copy(
+                            keyMappings = st.keyMappings + (keyId to funcId),
+                            statusMessage = "$keyLabel -> $actionLabel"
+                        )
+                    }
+                    mainHandler.postDelayed({
+                        if (_state.value.connected) {
+                            writeCommand(QcyProtocol.buildRequestDataCommand(0x2B))
+                        }
+                    }, 240L)
+                } else {
+                    _state.update { it.copy(statusMessage = "Falha ao enviar configuração de toque") }
+                }
+            }
+        )
+    }
+
+    fun refreshKeyMappings() {
+        writeCommand(QcyProtocol.buildRequestDataCommand(0x2B))
     }
 
     fun setSleepMode(enabled: Boolean, isAuto: Boolean = false) {
+        if (!_state.value.connected || bluetoothGatt == null || commandChar == null) {
+            _state.update {
+                it.copy(statusMessage = "Conecte o fone para enviar Modo Sono")
+            }
+            return
+        }
         val packet = QcyProtocol.buildSleepModeCommand(enabled)
-        val sent = writeCommand(packet)
-        _state.update {
-            it.copy(
-                sleepModeEnabled = enabled,
-                statusMessage = when {
-                    !it.connected -> "Conecte o fone para enviar Modo Sono"
-                    isAuto && enabled -> "Toques na lateral bloqueados automaticamente (Modo Sono)"
-                    enabled && sent -> "Modo Sono ativado (toques bloqueados)"
-                    !enabled && sent -> "Modo Sono desativado (toques liberados)"
-                    else -> "Comando Modo Sono preparado"
-                }
-            )
+        writeCommand(packet) { sent ->
+            _state.update {
+                it.copy(
+                    sleepModeEnabled = if (sent) enabled else it.sleepModeEnabled,
+                    statusMessage = when {
+                        !sent -> "Falha ao enviar Modo Sono (toques não alterados)"
+                        isAuto && enabled -> "Toques na lateral bloqueados automaticamente (Modo Sono)"
+                        enabled -> "Modo Sono ativado (toques bloqueados)"
+                        else -> "Modo Sono desativado (toques liberados)"
+                    }
+                )
+            }
         }
     }
 
@@ -950,18 +1242,25 @@ object QcyBleManager {
         val nextMode = baseMode.next()
 
         if (_state.value.connected && bluetoothGatt != null && commandChar != null) {
-            val sent = writeCommand(QcyProtocol.buildAncCommand(nextMode.meloBudsCmdId))
-            if (sent) {
-                appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                    ?.edit()?.putString(KEY_ANC_CYCLE_MODE, nextMode.name)?.apply()
-                _state.update {
-                    it.copy(
-                        ancCmdId = nextMode.meloBudsCmdId,
-                        ancCycleMode = nextMode,
-                        statusMessage = "Modo de ruído: ${nextMode.label}"
-                    )
+            appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                ?.edit()?.putString(KEY_ANC_CYCLE_MODE, nextMode.name)?.apply()
+            _state.update {
+                it.copy(
+                    ancCmdId = nextMode.meloBudsCmdId,
+                    ancCycleMode = nextMode,
+                    statusMessage = "Modo de ruído: ${nextMode.label}"
+                )
+            }
+            val queued = writeCommand(QcyProtocol.buildAncCommand(nextMode.meloBudsCmdId)) { sent ->
+                if (sent) {
+                    onFinished?.invoke()
+                } else {
+                    disconnect(resetPending = false)
+                    pendingAncTargetMode = nextMode
+                    connectOrAutoScan(onFinished = onFinished)
                 }
-                onFinished?.invoke()
+            }
+            if (queued) {
                 return nextMode
             }
             // Stale GATT link; reconnect and apply
@@ -986,7 +1285,13 @@ object QcyBleManager {
 
     fun warmUpIfAudioConnected(context: Context) {
         init(context)
-        if (_state.value.connected || _state.value.connecting || isScanning) return
+        if (_state.value.connected) {
+            if (_state.value.autoSleepOnConnect && !_state.value.sleepModeEnabled) {
+                ensureAutoSleepIfNeeded()
+            }
+            return
+        }
+        if (_state.value.connecting || isScanning) return
         val btAdapter = adapter() ?: return
         if (!btAdapter.isEnabled) return
         if (btAdapter.getProfileConnectionState(BluetoothProfile.A2DP) != BluetoothProfile.STATE_CONNECTED) return

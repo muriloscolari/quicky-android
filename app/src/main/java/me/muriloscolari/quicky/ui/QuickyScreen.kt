@@ -65,6 +65,8 @@ import me.muriloscolari.quicky.BuildConfig
 import me.muriloscolari.quicky.ble.AncCycleMode
 import me.muriloscolari.quicky.ble.AncSubScene
 import me.muriloscolari.quicky.ble.FindEarbudSide
+import me.muriloscolari.quicky.ble.QcyKeyAction
+import me.muriloscolari.quicky.ble.QcyKeyId
 import me.muriloscolari.quicky.ble.QcyUiState
 import me.muriloscolari.quicky.ble.UiStyle
 import me.muriloscolari.quicky.update.ReleaseInfo
@@ -99,6 +101,7 @@ fun QuickyScreen(
     onToggleLowLatency: (Boolean) -> Unit,
     onToggleLdac: (Boolean) -> Unit,
     onToggleDualConnect: (Boolean) -> Unit,
+    onSetKeyMapping: (Int, Int) -> Unit,
     onStartFindEarbuds: (FindEarbudSide) -> Unit,
     onStopFindEarbuds: () -> Unit,
     onToggleNotifications: (Boolean) -> Unit,
@@ -184,6 +187,7 @@ fun QuickyScreen(
                     onToggleLowLatency = onToggleLowLatency,
                     onToggleLdac = onToggleLdac,
                     onToggleDualConnect = onToggleDualConnect,
+                    onSetKeyMapping = onSetKeyMapping,
                     onStartFindEarbuds = onStartFindEarbuds,
                     onStopFindEarbuds = onStopFindEarbuds
                 )
@@ -210,6 +214,7 @@ private fun MainControlsPage(
     onToggleLowLatency: (Boolean) -> Unit,
     onToggleLdac: (Boolean) -> Unit,
     onToggleDualConnect: (Boolean) -> Unit,
+    onSetKeyMapping: (Int, Int) -> Unit,
     onStartFindEarbuds: (FindEarbudSide) -> Unit,
     onStopFindEarbuds: () -> Unit
 ) {
@@ -438,6 +443,13 @@ private fun MainControlsPage(
             )
         }
 
+        // Key / Gesture Customization Card
+        TouchCustomizationCard(
+            state = state,
+            isXiaomi = isXiaomi,
+            onSetKeyMapping = onSetKeyMapping
+        )
+
         // Find Earbuds Card
         FindEarbudsCard(
             state = state,
@@ -561,6 +573,168 @@ private fun NoiseControlSection(
                             fontWeight = if (active) FontWeight.Medium else FontWeight.Normal
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TouchCustomizationCard(
+    state: QcyUiState,
+    isXiaomi: Boolean,
+    onSetKeyMapping: (Int, Int) -> Unit
+) {
+    var expandedTaps by rememberSaveable { mutableStateOf(false) }
+    var editingKey by remember { mutableStateOf<QcyKeyId?>(null) }
+
+    val leftLongDisabled = state.keyMappings[QcyKeyId.LEFT_LONG.keyId] == QcyKeyAction.NONE.funcId
+    val rightLongDisabled = state.keyMappings[QcyKeyId.RIGHT_LONG.keyId] == QcyKeyAction.NONE.funcId
+
+    if (editingKey != null) {
+        val targetKey = editingKey!!
+        val currentFunc = state.keyMappings[targetKey.keyId] ?: targetKey.defaultFuncId
+        AlertDialog(
+            onDismissRequest = { editingKey = null },
+            containerColor = Color(0xFF191D26),
+            titleContentColor = TextPrimary,
+            textContentColor = TextSecondary,
+            title = {
+                Text(
+                    text = targetKey.label,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    QcyKeyAction.entries.forEach { action ->
+                        val selected = currentFunc == action.funcId
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(
+                                    if (selected) AccentBlue.copy(alpha = 0.16f) else Color.Transparent
+                                )
+                                .clickable {
+                                    onSetKeyMapping(targetKey.keyId, action.funcId)
+                                    editingKey = null
+                                }
+                                .padding(horizontal = 10.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = action.label,
+                                color = if (selected) AccentBlue else TextPrimary,
+                                fontSize = 14.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+                            )
+                            RadioDot(selected = selected)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { editingKey = null }) {
+                    Text("Fechar", color = TextSecondary)
+                }
+            }
+        )
+    }
+
+    RefinedSurfaceCard(isXiaomi = isXiaomi) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                Text(
+                    text = "Personalizar toques",
+                    color = TextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = if (state.sleepModeEnabled) {
+                        "Modo Sono ativo bloqueia todos os toques (incl. volume 3x)"
+                    } else {
+                        "Ajuste gestos sem bloquear o toque triplo de volume"
+                    },
+                    color = TextSecondary,
+                    fontSize = 12.sp
+                )
+            }
+            SoftPillButton(
+                text = if (expandedTaps) "Ocultar" else "1/2/3 toques",
+                active = expandedTaps,
+                onClick = { expandedTaps = !expandedTaps }
+            )
+        }
+
+        HorizontalDivider(color = DividerSubtle)
+
+        SettingToggleRow(
+            title = "Desativar segurar Esquerdo",
+            subtitle = "Remove Modo Jogo ao segurar · experimental (depende do firmware)",
+            checked = leftLongDisabled,
+            onCheckedChange = { disable ->
+                onSetKeyMapping(
+                    QcyKeyId.LEFT_LONG.keyId,
+                    if (disable) QcyKeyAction.NONE.funcId else QcyKeyId.LEFT_LONG.defaultFuncId
+                )
+            }
+        )
+
+        HorizontalDivider(color = DividerSubtle)
+
+        SettingToggleRow(
+            title = "Desativar segurar Direito",
+            subtitle = "Remove troca de ANC ao segurar · experimental (depende do firmware)",
+            checked = rightLongDisabled,
+            onCheckedChange = { disable ->
+                onSetKeyMapping(
+                    QcyKeyId.RIGHT_LONG.keyId,
+                    if (disable) QcyKeyAction.NONE.funcId else QcyKeyId.RIGHT_LONG.defaultFuncId
+                )
+            }
+        )
+
+        if (expandedTaps) {
+            val tapKeys = listOf(
+                QcyKeyId.LEFT_SINGLE,
+                QcyKeyId.RIGHT_SINGLE,
+                QcyKeyId.LEFT_DOUBLE,
+                QcyKeyId.RIGHT_DOUBLE,
+                QcyKeyId.LEFT_TRIPLE,
+                QcyKeyId.RIGHT_TRIPLE
+            )
+            tapKeys.forEach { key ->
+                val currentFuncId = state.keyMappings[key.keyId] ?: key.defaultFuncId
+                HorizontalDivider(color = DividerSubtle)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { editingKey = key }
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = key.label,
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = QcyKeyAction.labelFor(currentFuncId),
+                        color = AccentBlue,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
                 }
             }
         }

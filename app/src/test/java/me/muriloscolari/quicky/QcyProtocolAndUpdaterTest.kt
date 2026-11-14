@@ -78,4 +78,14 @@ class QcyProtocolAndUpdaterTest {
         assertFalse(AppUpdater.isNewerVersion("0.1.0", "v0.1.0"))
         assertFalse(AppUpdater.isNewerVersion("0.2.0", "0.1.9"))
     }
+
+    @Test
+    fun keyFunctionPairsBuildAndParseRoundTrip() {
+        val raw = QcyProtocol.buildKeyFunctionData(listOf(0x09 to 0x00, 0x0A to 0x0B))
+        assertArrayEquals(byteArrayOf(0x09, 0x00, 0x0A, 0x0B), raw)
+
+        val parsed = QcyProtocol.parseKeyFunctionPairs(raw)
+        assertEquals(0x00, parsed[0x09])
+        assertEquals(0x0B, parsed[0x0A])
+    }
 }

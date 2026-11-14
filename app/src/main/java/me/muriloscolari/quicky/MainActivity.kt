@@ -162,6 +162,7 @@ class MainActivity : ComponentActivity() {
                     onToggleLowLatency = { enabled -> QcyBleManager.setLowLatency(enabled) },
                     onToggleLdac = { enabled -> QcyBleManager.setLdacEnabled(enabled) },
                     onToggleDualConnect = { enabled -> QcyBleManager.setDualConnectEnabled(enabled) },
+                    onSetKeyMapping = { keyId, funcId -> QcyBleManager.setKeyMapping(keyId, funcId) },
                     onStartFindEarbuds = { side -> QcyBleManager.startFindingEarbuds(side) },
                     onStopFindEarbuds = { QcyBleManager.stopFindingEarbuds() },
                     onToggleNotifications = { enabled ->
