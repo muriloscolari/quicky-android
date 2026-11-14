@@ -311,18 +311,20 @@ private fun MainControlsPage(
                     charging = state.battery.rightCharging,
                     modifier = Modifier.weight(1f)
                 )
-                Box(
-                    modifier = Modifier
-                        .width(1.dp)
-                        .height(44.dp)
-                        .background(DividerSubtle)
-                )
-                BatteryColumn(
-                    label = "Estojo",
-                    level = state.battery.caseLevel,
-                    charging = state.battery.caseCharging,
-                    modifier = Modifier.weight(1f)
-                )
+                if (state.battery.caseLevel > 0 || state.battery.caseCharging) {
+                    Box(
+                        modifier = Modifier
+                            .width(1.dp)
+                            .height(44.dp)
+                            .background(DividerSubtle)
+                    )
+                    BatteryColumn(
+                        label = "Estojo",
+                        level = state.battery.caseLevel,
+                        charging = state.battery.caseCharging,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
             }
         }
 

@@ -969,6 +969,7 @@ object QcyBleManager {
     fun refreshBatteryAndVersion() {
         batteryChar?.let { enqueueGattOp(GattOp.ReadChar(it)) }
         versionChar?.let { enqueueGattOp(GattOp.ReadChar(it)) }
+        writeCommand(QcyProtocol.buildRequestDataCommand(0x2F))
         writeCommand(QcyProtocol.buildRequestDataCommand(0x10))
         writeCommand(QcyProtocol.buildRequestDataCommand(0x2B))
     }
