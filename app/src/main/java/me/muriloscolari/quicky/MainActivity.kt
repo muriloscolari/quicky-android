@@ -3,6 +3,7 @@ package me.muriloscolari.quicky
 import android.Manifest
 import android.bluetooth.le.ScanFilter
 import android.companion.AssociationRequest
+import android.companion.BluetoothDeviceFilter
 import android.companion.BluetoothLeDeviceFilter
 import android.companion.CompanionDeviceManager
 import android.content.ComponentName
@@ -274,6 +275,14 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        // Release active GATT link briefly so the earbuds also advertise BLE if needed,
+        // while BluetoothDeviceFilter immediately lists already-bonded/connected earbuds.
+        if (QcyBleManager.state.value.connected) {
+            QcyBleManager.disconnect(resetPending = false)
+        }
+
+        val classicFilter = BluetoothDeviceFilter.Builder().build()
+
         val bleFilter = BluetoothLeDeviceFilter.Builder()
             .setScanFilter(
                 ScanFilter.Builder()
@@ -283,6 +292,7 @@ class MainActivity : ComponentActivity() {
             .build()
 
         val request = AssociationRequest.Builder()
+            .addDeviceFilter(classicFilter)
             .addDeviceFilter(bleFilter)
             .setSingleDevice(false)
             .build()
