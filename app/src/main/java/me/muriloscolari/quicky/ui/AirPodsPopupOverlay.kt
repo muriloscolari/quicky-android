@@ -2,6 +2,7 @@ package me.muriloscolari.quicky.ui
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Dialog
 import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
@@ -11,6 +12,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
@@ -18,13 +20,17 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
+import android.util.TypedValue
+import android.view.ContextThemeWrapper
 import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.ViewOutlineProvider
+import android.view.Window
 import android.view.WindowManager
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -32,13 +38,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -47,14 +54,17 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -72,13 +82,13 @@ import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import me.muriloscolari.quicky.MainActivity
 import me.muriloscolari.quicky.R
 import me.muriloscolari.quicky.ble.AncCycleMode
 import me.muriloscolari.quicky.ble.QcyBleManager
 import me.muriloscolari.quicky.ble.QcyProtocol
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.min
 
 /**
  * Floating AirPods-style pop-up sheet rendered via WindowManager (TYPE_APPLICATION_OVERLAY).
@@ -101,6 +111,7 @@ object AirPodsPopupController {
     @Volatile
     private var pendingShowRunnable: Runnable? = null
 
+    private var overlayDialog: Dialog? = null
     private var windowManager: WindowManager? = null
     private var overlayView: ComposeView? = null
     private var overlayLifecycleOwner: OverlayLifecycleOwner? = null
@@ -241,17 +252,52 @@ object AirPodsPopupController {
 
     private fun removeOverlayImmediately() {
         dismissStateTrigger = null
+        val dialog = overlayDialog
         val view = overlayView
         val wm = windowManager
         val owner = overlayLifecycleOwner
+        overlayDialog = null
         overlayView = null
         overlayLifecycleOwner = null
         windowManager = null
 
+        if (dialog != null) {
+            runCatching {
+                dialog.window?.setWindowAnimations(0)
+                dialog.dismiss()
+            }
+        }
         if (view != null && wm != null) {
             runCatching { wm.removeViewImmediate(view) }
         }
         owner?.destroy()
+    }
+
+    private fun dismissWithWindowAnimation() {
+        dismissStateTrigger = null
+        val dialog = overlayDialog
+        if (dialog != null) {
+            overlayDialog = null
+            runCatching { dialog.dismiss() }
+                .onFailure { removeOverlayImmediately() }
+            return
+        }
+        removeOverlayImmediately()
+    }
+
+    private fun dpToPx(context: Context, dp: Float): Float =
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, dp, context.resources.displayMetrics)
+
+    private fun computeCardWidthPx(context: Context, wm: WindowManager): Int {
+        val screenWidthPx = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching { wm.currentWindowMetrics.bounds.width() }
+                .getOrElse { context.resources.displayMetrics.widthPixels }
+        } else {
+            context.resources.displayMetrics.widthPixels
+        }
+        val horizontalMarginsPx = dpToPx(context, 32f).toInt()
+        val maxCardWidthPx = dpToPx(context, 420f).toInt()
+        return min((screenWidthPx - horizontalMarginsPx).coerceAtLeast(dpToPx(context, 260f).toInt()), maxCardWidthPx)
     }
 
     private fun resolveOverlayContext(appCtx: Context): Context {
@@ -280,46 +326,130 @@ object AirPodsPopupController {
         val wm = overlayCtx.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
             ?: appCtx.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
             ?: return
+        val cardWidthPx = computeCardWidthPx(overlayCtx, wm)
+        val hasLiveWindowBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            runCatching { wm.isCrossWindowBlurEnabled }.getOrDefault(false)
+
         val owner = OverlayLifecycleOwner()
         owner.createAndResume()
+        var activeWindowHasBlur = false
 
-        val flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+        val composeView = ComposeView(overlayCtx).apply {
+            setContent {
+                AirPodsPopupOverlayContent(
+                    isPreview = isPreview,
+                    hasLiveWindowBlur = activeWindowHasBlur,
+                    onRegisterDismissTrigger = { trigger ->
+                        dismissStateTrigger = trigger
+                    },
+                    onDismissed = {
+                        dismissWithWindowAnimation()
+                    }
+                )
+            }
+        }
+
+        // Primary path: TYPE_APPLICATION_OVERLAY Dialog supports Window.setBackgroundBlurRadius()
+        // clipped cleanly to the 30dp rounded pill corners + smooth native SurfaceFlinger animations.
+        val dialogShown = runCatching {
+            val themedCtx = ContextThemeWrapper(overlayCtx, android.R.style.Theme_Translucent_NoTitleBar)
+            val dialog = Dialog(themedCtx).apply {
+                requestWindowFeature(Window.FEATURE_NO_TITLE)
+                setCancelable(false)
+                setCanceledOnTouchOutside(true)
+            }
+
+            val cornerPx = dpToPx(overlayCtx, 30f)
+            val blurPx = dpToPx(overlayCtx, 40f).toInt()
+            val bottomMarginPx = dpToPx(overlayCtx, 14f).toInt()
+
+            val window = dialog.window ?: error("Dialog window unavailable")
+            window.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
+            window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+            )
+            window.setGravity(Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
+            window.setLayout(cardWidthPx, WindowManager.LayoutParams.WRAP_CONTENT)
+            window.setWindowAnimations(R.style.LiquidGlassPopupWindowAnimation)
+            window.attributes = window.attributes.apply {
+                format = PixelFormat.TRANSLUCENT
+                y = bottomMarginPx
+            }
+
+            val bgDrawable = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = cornerPx
+                // Non-zero alpha ensures GradientDrawable.getOutline() provides a rounded outline
+                // so Android 12+ clips live cross-window blur cleanly to the pill shape.
+                setColor(if (hasLiveWindowBlur) 0x02000000 else android.graphics.Color.TRANSPARENT)
+            }
+            window.setBackgroundDrawable(bgDrawable)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && hasLiveWindowBlur) {
+                window.setBackgroundBlurRadius(blurPx)
+                activeWindowHasBlur = true
+            }
+
+            window.decorView.apply {
+                clipToOutline = true
+                outlineProvider = ViewOutlineProvider.BACKGROUND
+                setViewTreeLifecycleOwner(owner)
+                setViewTreeSavedStateRegistryOwner(owner)
+                setViewTreeViewModelStoreOwner(owner)
+                setOnTouchListener { _, event ->
+                    if (event.action == MotionEvent.ACTION_OUTSIDE) {
+                        dismissStateTrigger?.invoke() ?: dismissWithWindowAnimation()
+                    }
+                    false
+                }
+            }
+
+            dialog.setOnDismissListener {
+                if (overlayLifecycleOwner === owner) {
+                    overlayDialog = null
+                    overlayLifecycleOwner = null
+                    dismissStateTrigger = null
+                    owner.destroy()
+                }
+            }
+
+            dialog.setContentView(composeView)
+            dialog.show()
+            overlayDialog = dialog
+            overlayLifecycleOwner = owner
+            true
+        }.getOrDefault(false)
+
+        if (dialogShown) return
+
+        // Fallback path: direct WindowManager.addView if OEM blocks TYPE_APPLICATION_OVERLAY Dialog
+        activeWindowHasBlur = false
+        composeView.setViewTreeLifecycleOwner(owner)
+        composeView.setViewTreeSavedStateRegistryOwner(owner)
+        composeView.setViewTreeViewModelStoreOwner(owner)
+        composeView.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_OUTSIDE) {
+                dismissStateTrigger?.invoke() ?: removeOverlayImmediately()
+            }
+            false
+        }
+
+        val flags = WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
             WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
-
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
+            cardWidthPx,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             flags,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-        }
-
-        val composeView = ComposeView(overlayCtx).apply {
-            setViewTreeLifecycleOwner(owner)
-            setViewTreeSavedStateRegistryOwner(owner)
-            setViewTreeViewModelStoreOwner(owner)
-            setOnTouchListener { _, event ->
-                if (event.action == MotionEvent.ACTION_OUTSIDE) {
-                    dismissStateTrigger?.invoke() ?: removeOverlayImmediately()
-                }
-                false
-            }
-            setContent {
-                AirPodsPopupOverlayContent(
-                    isPreview = isPreview,
-                    onRegisterDismissTrigger = { trigger ->
-                        dismissStateTrigger = trigger
-                    },
-                    onDismissed = {
-                        removeOverlayImmediately()
-                    }
-                )
-            }
+            y = dpToPx(overlayCtx, 14f).toInt()
         }
 
         runCatching {
@@ -430,17 +560,14 @@ object AirPodsPopupController {
 @Composable
 private fun AirPodsPopupOverlayContent(
     isPreview: Boolean,
+    hasLiveWindowBlur: Boolean,
     onRegisterDismissTrigger: (() -> Unit) -> Unit,
     onDismissed: () -> Unit
 ) {
     val state by QcyBleManager.state.collectAsState()
     val colors = rememberAppleColors()
     val haptics = rememberAppleHaptics()
-    val scope = rememberCoroutineScope()
-    val density = LocalDensity.current
-    val slideOffsetPx = with(density) { 180.dp.toPx() }
 
-    val progress = remember { Animatable(1f) }
     var dismissing by remember { androidx.compose.runtime.mutableStateOf(false) }
     var hadActiveLink by remember { androidx.compose.runtime.mutableStateOf(false) }
     var interactionNonce by remember { mutableIntStateOf(0) }
@@ -448,16 +575,12 @@ private fun AirPodsPopupOverlayContent(
     val triggerDismiss: () -> Unit = {
         if (!dismissing) {
             dismissing = true
-            scope.launch {
-                progress.animateTo(1f, animationSpec = tween(durationMillis = 200))
-                onDismissed()
-            }
+            onDismissed()
         }
     }
 
     LaunchedEffect(Unit) {
         onRegisterDismissTrigger(triggerDismiss)
-        progress.animateTo(0f, animationSpec = AppleMotion.criticalSpring())
     }
 
     // Auto-dismiss 6s after appear or last interaction
@@ -482,129 +605,255 @@ private fun AirPodsPopupOverlayContent(
         LocalAppleColors provides colors,
         LocalAppleHaptics provides haptics
     ) {
+        val cardShape = RoundedCornerShape(30.dp)
+        val baseGlassFill = when {
+            hasLiveWindowBlur && colors.isDark -> Color(0xFF13151A).copy(alpha = 0.50f)
+            hasLiveWindowBlur -> Color(0xFFF7F9FF).copy(alpha = 0.56f)
+            colors.isDark -> Color(0xFF17191E).copy(alpha = 0.88f)
+            else -> Color(0xFFF6F8FC).copy(alpha = 0.90f)
+        }
+        val specularBorderBrush = if (colors.isDark) {
+            Brush.linearGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.65f),
+                    Color.White.copy(alpha = 0.14f),
+                    Color(0xFF64D2FF).copy(alpha = 0.28f)
+                )
+            )
+        } else {
+            Brush.linearGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.96f),
+                    Color.White.copy(alpha = 0.30f),
+                    Color.Black.copy(alpha = 0.12f)
+                )
+            )
+        }
+        val lensSheenBrush = if (colors.isDark) {
+            Brush.verticalGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.16f),
+                    Color.White.copy(alpha = 0.03f),
+                    Color.Transparent,
+                    Color.White.copy(alpha = 0.05f)
+                )
+            )
+        } else {
+            Brush.verticalGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = 0.55f),
+                    Color.White.copy(alpha = 0.12f),
+                    Color.Transparent,
+                    Color.White.copy(alpha = 0.20f)
+                )
+            )
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            contentAlignment = Alignment.BottomCenter
-        ) {
-            // Use translucent fallback (`useHaze = false`) because WindowManager has no HazeSource
-            GlassSurface(
-                hazeState = null,
-                useHaze = false,
-                cornerRadius = 30.dp,
-                specular = 0.56f,
-                modifier = Modifier
-                    .widthIn(max = 420.dp)
-                    .fillMaxWidth()
-                    .graphicsLayer {
-                        translationY = progress.value * slideOffsetPx
-                        alpha = (1f - progress.value).coerceIn(0f, 1f)
-                    }
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null
-                    ) {
-                        interactionNonce++
-                    }
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 18.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                .clip(cardShape)
+                .background(baseGlassFill)
+                .background(lensSheenBrush)
+                .border(1.1.dp, specularBorderBrush, cardShape)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
                 ) {
-                    // Grabber handle
-                    Box(
-                        modifier = Modifier
-                            .size(width = 36.dp, height = 4.dp)
-                            .clip(CircleShape)
-                            .background(colors.secondaryLabel.copy(alpha = 0.35f))
+                    interactionNonce++
+                }
+        ) {
+            if (!hasLiveWindowBlur) {
+                Canvas(modifier = Modifier.matchParentSize()) {
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                colors.accent.copy(alpha = if (colors.isDark) 0.18f else 0.12f),
+                                Color.Transparent
+                            ),
+                            center = Offset(size.width * 0.18f, size.height * 0.12f),
+                            radius = size.width * 0.72f
+                        )
                     )
-                    Spacer(modifier = Modifier.height(14.dp))
-
-                    Text(
-                        text = state.modelTitle,
-                        style = AppleTypography.title3,
-                        color = colors.label,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(7.dp)
-                                .clip(CircleShape)
-                                .background(if (state.connected) colors.green else colors.accent)
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                colors.green.copy(alpha = if (colors.isDark) 0.12f else 0.09f),
+                                Color.Transparent
+                            ),
+                            center = Offset(size.width * 0.85f, size.height * 0.65f),
+                            radius = size.width * 0.60f
                         )
-                        Text(
-                            text = if (state.connected) {
-                                "Conectado · ${QcyProtocol.formatAncShortLabel(state.ancCmdId)}"
-                            } else if (isPreview) {
-                                "Pré-visualização do pop-up"
-                            } else {
-                                "Áudio conectado · sincronizando..."
-                            },
-                            style = AppleTypography.footnote,
-                            color = colors.secondaryLabel
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(18.dp))
-
-                    val bat = state.battery
-                    val hasCase = bat.caseLevel > 0 || bat.caseCharging
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        PopupBatteryRing(
-                            label = "Esquerdo",
-                            level = bat.left,
-                            charging = bat.leftCharging
-                        )
-                        PopupBatteryRing(
-                            label = "Direito",
-                            level = bat.right,
-                            charging = bat.rightCharging
-                        )
-                        if (hasCase) {
-                            PopupBatteryRing(
-                                label = "Estojo",
-                                level = bat.caseLevel,
-                                charging = bat.caseCharging
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(18.dp))
-
-                    PortalSegmentedControl(
-                        items = AncCycleMode.entries,
-                        selectedItem = state.ancCycleMode,
-                        labelProvider = { it.label },
-                        onSelect = { mode ->
-                            interactionNonce++
-                            QcyBleManager.setAncCycleMode(mode)
-                        }
-                    )
-
-                    Spacer(modifier = Modifier.height(14.dp))
-
-                    ApplePillButton(
-                        text = "Fechar",
-                        prominent = false,
-                        modifier = Modifier.fillMaxWidth(),
-                        onClick = { triggerDismiss() }
                     )
                 }
             }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 18.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Grabber handle
+                Box(
+                    modifier = Modifier
+                        .size(width = 36.dp, height = 4.dp)
+                        .clip(CircleShape)
+                        .background(colors.secondaryLabel.copy(alpha = 0.38f))
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    PopupEarbudsEmblem(
+                        accentColor = if (state.connected) colors.green else colors.accent,
+                        isDark = colors.isDark
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = state.modelTitle,
+                            style = AppleTypography.title3,
+                            color = colors.label,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(if (state.connected) colors.green else colors.accent)
+                            )
+                            Text(
+                                text = if (state.connected) {
+                                    "Conectado · ${QcyProtocol.formatAncShortLabel(state.ancCmdId)}"
+                                } else if (isPreview) {
+                                    "Liquid Glass · Pré-visualização"
+                                } else {
+                                    "Áudio conectado · sincronizando..."
+                                },
+                                style = AppleTypography.footnote,
+                                color = colors.secondaryLabel
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                val bat = state.battery
+                val hasCase = bat.caseLevel > 0 || bat.caseCharging
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    PopupBatteryRing(
+                        label = "Esquerdo",
+                        level = bat.left,
+                        charging = bat.leftCharging
+                    )
+                    PopupBatteryRing(
+                        label = "Direito",
+                        level = bat.right,
+                        charging = bat.rightCharging
+                    )
+                    if (hasCase) {
+                        PopupBatteryRing(
+                            label = "Estojo",
+                            level = bat.caseLevel,
+                            charging = bat.caseCharging
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                PortalSegmentedControl(
+                    items = AncCycleMode.entries,
+                    selectedItem = state.ancCycleMode,
+                    labelProvider = { it.label },
+                    onSelect = { mode ->
+                        interactionNonce++
+                        QcyBleManager.setAncCycleMode(mode)
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                ApplePillButton(
+                    text = "Fechar",
+                    prominent = false,
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = { triggerDismiss() }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PopupEarbudsEmblem(
+    accentColor: Color,
+    isDark: Boolean
+) {
+    val badgeShape = RoundedCornerShape(14.dp)
+    val tintBg = if (isDark) Color.White.copy(alpha = 0.11f) else Color.White.copy(alpha = 0.55f)
+    val rimColor = if (isDark) Color.White.copy(alpha = 0.28f) else Color.White.copy(alpha = 0.85f)
+    val iconColor = if (isDark) Color.White.copy(alpha = 0.92f) else Color(0xFF1C1C1E)
+
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .clip(badgeShape)
+            .background(tintBg)
+            .border(0.8.dp, rimColor, badgeShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.size(22.dp)) {
+            val w = size.width
+            val h = size.height
+            // Glow behind earbuds
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(accentColor.copy(alpha = 0.40f), Color.Transparent)
+                ),
+                radius = w * 0.65f
+            )
+            val stroke = Stroke(width = w * 0.085f)
+            // Left earbud silhouette
+            drawRoundRect(
+                color = iconColor,
+                topLeft = Offset(w * 0.10f, h * 0.14f),
+                size = Size(w * 0.30f, h * 0.28f),
+                cornerRadius = CornerRadius(w * 0.14f)
+            )
+            drawLine(
+                color = iconColor,
+                start = Offset(w * 0.25f, h * 0.40f),
+                end = Offset(w * 0.25f, h * 0.84f),
+                strokeWidth = stroke.width
+            )
+            // Right earbud silhouette
+            drawRoundRect(
+                color = iconColor,
+                topLeft = Offset(w * 0.60f, h * 0.14f),
+                size = Size(w * 0.30f, h * 0.28f),
+                cornerRadius = CornerRadius(w * 0.14f)
+            )
+            drawLine(
+                color = iconColor,
+                start = Offset(w * 0.75f, h * 0.40f),
+                end = Offset(w * 0.75f, h * 0.84f),
+                strokeWidth = stroke.width
+            )
         }
     }
 }
