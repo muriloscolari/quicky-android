@@ -33,6 +33,7 @@ import kotlin.math.PI
 import kotlin.math.sin
 
 enum class UiStyle(val label: String, val subtitle: String) {
+    APPLE_LIQUID_GLASS("Apple Liquid Glass", "Estética iOS com barras em vidro e cartões agrupados"),
     XIAOMI_HYPEROS("Xiaomi HyperOS", "Blur translúcido e visual glassmorphism"),
     MATERIAL_LIGHTWEIGHT("Material 3 (Leve)", "Superfícies sólidas para celulares mais simples")
 }
@@ -69,7 +70,7 @@ data class QcyUiState(
     val keyMappings: Map<Int, Int> = emptyMap(),
     val notificationsEnabled: Boolean = false,
     val findingSide: FindEarbudSide? = null,
-    val uiStyle: UiStyle = UiStyle.XIAOMI_HYPEROS,
+    val uiStyle: UiStyle = UiStyle.APPLE_LIQUID_GLASS,
     val updateSource: UpdateSource = UpdateSource.FORGEJO,
     val autoCheckUpdates: Boolean = true,
     val lastSavedAddress: String = "",
@@ -160,7 +161,7 @@ object QcyBleManager {
         appContext = ctx
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val autoSleep = prefs.getBoolean(KEY_AUTO_SLEEP, true)
-        val styleName = prefs.getString(KEY_UI_STYLE, UiStyle.XIAOMI_HYPEROS.name) ?: UiStyle.XIAOMI_HYPEROS.name
+        val styleName = prefs.getString(KEY_UI_STYLE, UiStyle.APPLE_LIQUID_GLASS.name) ?: UiStyle.APPLE_LIQUID_GLASS.name
         val sourceName = prefs.getString(KEY_UPDATE_SOURCE, UpdateSource.FORGEJO.name) ?: UpdateSource.FORGEJO.name
         val autoUpdate = prefs.getBoolean(KEY_AUTO_UPDATE, true)
         val lastAddr = prefs.getString(KEY_LAST_ADDRESS, "") ?: ""
@@ -174,7 +175,7 @@ object QcyBleManager {
             .takeIf { it in QcyProtocol.AMBIENT_START_CMD_ID..QcyProtocol.AMBIENT_END_CMD_ID }
             ?: AncCycleMode.AMBIENT.meloBudsCmdId
 
-        val style = runCatching { UiStyle.valueOf(styleName) }.getOrDefault(UiStyle.XIAOMI_HYPEROS)
+        val style = runCatching { UiStyle.valueOf(styleName) }.getOrDefault(UiStyle.APPLE_LIQUID_GLASS)
         val source = runCatching { UpdateSource.valueOf(sourceName) }.getOrDefault(UpdateSource.FORGEJO)
         val savedAnc = runCatching { AncCycleMode.valueOf(savedAncName) }.getOrDefault(AncCycleMode.OFF)
         val initialCmdId = when (savedAnc) {

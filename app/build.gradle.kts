@@ -1,19 +1,18 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {
     namespace = "me.muriloscolari.quicky"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "me.muriloscolari.quicky"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.4.6"
+        versionCode = 11
+        versionName = "0.5.0"
 
         resourceConfigurations += listOf("pt", "en")
     }
@@ -38,14 +37,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_21
     }
 
-    kotlinOptions {
-        jvmTarget = "21"
-        freeCompilerArgs += listOf(
-            "-Xjvm-default=all",
-            "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api"
-        )
-    }
-
     buildFeatures {
         compose = true
         buildConfig = true
@@ -58,8 +49,18 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+        freeCompilerArgs.addAll(
+            "-Xjvm-default=all",
+            "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api"
+        )
+    }
+}
+
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
+    val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
     implementation(composeBom)
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
@@ -67,6 +68,8 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.material3:material3")
+    implementation("dev.chrisbanes.haze:haze:2.1.0")
+    implementation("dev.chrisbanes.haze:haze-glass:2.1.0")
 
     testImplementation("junit:junit:4.13.2")
 }

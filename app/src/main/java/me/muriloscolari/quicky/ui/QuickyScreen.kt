@@ -118,6 +118,45 @@ fun QuickyScreen(
     onCheckUpdateNow: () -> Unit,
     onDownloadAndInstallUpdate: (ReleaseInfo) -> Unit
 ) {
+    if (state.uiStyle == UiStyle.APPLE_LIQUID_GLASS) {
+        AppleQuickyScreen(
+            state = state,
+            checkingUpdate = checkingUpdate,
+            downloadingPercent = downloadingPercent,
+            availableRelease = availableRelease,
+            updateStatusText = updateStatusText,
+            batteryUnrestricted = batteryUnrestricted,
+            companionLinked = companionLinked,
+            isXiaomiDevice = isXiaomiDevice,
+            companionStatusNote = companionStatusNote,
+            onScanClick = onScanClick,
+            onConnectDevice = onConnectDevice,
+            onDisconnectClick = onDisconnectClick,
+            onRefreshClick = onRefreshClick,
+            onCycleAncClick = onCycleAncClick,
+            onSelectAncMode = onSelectAncMode,
+            onSelectAncCmdId = onSelectAncCmdId,
+            onToggleSleepMode = onToggleSleepMode,
+            onToggleAutoSleepOnConnect = onToggleAutoSleepOnConnect,
+            onToggleLowLatency = onToggleLowLatency,
+            onToggleLdac = onToggleLdac,
+            onToggleDualConnect = onToggleDualConnect,
+            onSetKeyMapping = onSetKeyMapping,
+            onStartFindEarbuds = onStartFindEarbuds,
+            onStopFindEarbuds = onStopFindEarbuds,
+            onToggleNotifications = onToggleNotifications,
+            onRequestBatteryUnrestricted = onRequestBatteryUnrestricted,
+            onRequestCompanionLink = onRequestCompanionLink,
+            onOpenXiaomiAutostart = onOpenXiaomiAutostart,
+            onSelectUiStyle = onSelectUiStyle,
+            onSelectUpdateSource = onSelectUpdateSource,
+            onToggleAutoCheckUpdates = onToggleAutoCheckUpdates,
+            onCheckUpdateNow = onCheckUpdateNow,
+            onDownloadAndInstallUpdate = onDownloadAndInstallUpdate
+        )
+        return
+    }
+
     var showSettings by rememberSaveable { mutableStateOf(false) }
     val isXiaomi = state.uiStyle == UiStyle.XIAOMI_HYPEROS
 

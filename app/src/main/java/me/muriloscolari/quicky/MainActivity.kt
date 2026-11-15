@@ -22,17 +22,22 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalView
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -139,7 +144,17 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            MaterialTheme(colorScheme = darkColorScheme()) {
+            val isDarkUi = state.uiStyle != me.muriloscolari.quicky.ble.UiStyle.APPLE_LIQUID_GLASS || isSystemInDarkTheme()
+            val view = LocalView.current
+            if (!view.isInEditMode) {
+                SideEffect {
+                    val controller = WindowCompat.getInsetsController(window, view)
+                    controller.isAppearanceLightStatusBars = !isDarkUi
+                    controller.isAppearanceLightNavigationBars = !isDarkUi
+                }
+            }
+
+            MaterialTheme(colorScheme = if (isDarkUi) darkColorScheme() else lightColorScheme()) {
                 QuickyScreen(
                     state = state,
                     checkingUpdate = checkingUpdate,
