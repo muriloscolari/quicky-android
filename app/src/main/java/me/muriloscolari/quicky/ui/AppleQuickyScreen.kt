@@ -60,7 +60,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
@@ -74,6 +76,7 @@ import me.muriloscolari.quicky.BuildConfig
 import me.muriloscolari.quicky.ble.AncCycleMode
 import me.muriloscolari.quicky.ble.AncSubScene
 import me.muriloscolari.quicky.ble.FindEarbudSide
+import me.muriloscolari.quicky.ble.QcyEqPreset
 import me.muriloscolari.quicky.ble.QcyKeyAction
 import me.muriloscolari.quicky.ble.QcyKeyId
 import me.muriloscolari.quicky.ble.QcyProtocol
@@ -85,6 +88,7 @@ import kotlin.math.roundToInt
 
 private enum class AppleTab(val label: String) {
     CONTROLS("Controles"),
+    SOUND("Som"),
     SETTINGS("Ajustes")
 }
 
@@ -97,6 +101,7 @@ fun AppleQuickyScreen(
     updateStatusText: String,
     batteryUnrestricted: Boolean,
     companionLinked: Boolean,
+    overlayPermissionGranted: Boolean,
     isXiaomiDevice: Boolean,
     companionStatusNote: String?,
     onScanClick: () -> Unit,
@@ -111,9 +116,14 @@ fun AppleQuickyScreen(
     onToggleLowLatency: (Boolean) -> Unit,
     onToggleLdac: (Boolean) -> Unit,
     onToggleDualConnect: (Boolean) -> Unit,
+    onSelectEqPreset: (QcyEqPreset) -> Unit,
+    onSetCustomEqBands: (List<Int>) -> Unit,
+    onSetSoundBalance: (Int) -> Unit,
     onSetKeyMapping: (Int, Int) -> Unit,
     onStartFindEarbuds: (FindEarbudSide) -> Unit,
     onStopFindEarbuds: () -> Unit,
+    onToggleAirpodsPopup: (Boolean) -> Unit,
+    onRequestOverlayPermission: () -> Unit,
     onToggleNotifications: (Boolean) -> Unit,
     onRequestBatteryUnrestricted: () -> Unit,
     onRequestCompanionLink: () -> Unit,
@@ -134,8 +144,13 @@ fun AppleQuickyScreen(
     var pendingFindSide by remember { mutableStateOf<FindEarbudSide?>(null) }
 
     val controlsListState = rememberLazyListState()
+    val soundListState = rememberLazyListState()
     val settingsListState = rememberLazyListState()
-    val currentListState = if (activeTab == AppleTab.CONTROLS) controlsListState else settingsListState
+    val currentListState = when (activeTab) {
+        AppleTab.CONTROLS -> controlsListState
+        AppleTab.SOUND -> soundListState
+        AppleTab.SETTINGS -> settingsListState
+    }
 
     val collapseProgress by remember(currentListState) {
         derivedStateOf {
@@ -159,11 +174,11 @@ fun AppleQuickyScreen(
         label = "sheetPullbackCorner"
     )
 
-    BackHandler(enabled = pendingFindSide != null || editingKey != null || activeTab == AppleTab.SETTINGS) {
+    BackHandler(enabled = pendingFindSide != null || editingKey != null || activeTab != AppleTab.CONTROLS) {
         when {
             pendingFindSide != null -> pendingFindSide = null
             editingKey != null -> editingKey = null
-            activeTab == AppleTab.SETTINGS -> activeTab = AppleTab.CONTROLS
+            activeTab != AppleTab.CONTROLS -> activeTab = AppleTab.CONTROLS
         }
     }
 
@@ -199,8 +214,8 @@ fun AppleQuickyScreen(
                         isDark = appleColors.isDark
                     )
 
-                    if (activeTab == AppleTab.CONTROLS) {
-                        AppleControlsList(
+                    when (activeTab) {
+                        AppleTab.CONTROLS -> AppleControlsList(
                             listState = controlsListState,
                             state = state,
                             collapseProgress = collapseProgress,
@@ -227,8 +242,15 @@ fun AppleQuickyScreen(
                             onStartFindEarbuds = onStartFindEarbuds,
                             onStopFindEarbuds = onStopFindEarbuds
                         )
-                    } else {
-                        AppleSettingsList(
+                        AppleTab.SOUND -> AppleSoundList(
+                            listState = soundListState,
+                            state = state,
+                            collapseProgress = collapseProgress,
+                            onSelectEqPreset = onSelectEqPreset,
+                            onSetCustomEqBands = onSetCustomEqBands,
+                            onSetSoundBalance = onSetSoundBalance
+                        )
+                        AppleTab.SETTINGS -> AppleSettingsList(
                             listState = settingsListState,
                             state = state,
                             collapseProgress = collapseProgress,
@@ -238,8 +260,11 @@ fun AppleQuickyScreen(
                             updateStatusText = updateStatusText,
                             batteryUnrestricted = batteryUnrestricted,
                             companionLinked = companionLinked,
+                            overlayPermissionGranted = overlayPermissionGranted,
                             isXiaomiDevice = isXiaomiDevice,
                             companionStatusNote = companionStatusNote,
+                            onToggleAirpodsPopup = onToggleAirpodsPopup,
+                            onRequestOverlayPermission = onRequestOverlayPermission,
                             onToggleNotifications = onToggleNotifications,
                             onRequestBatteryUnrestricted = onRequestBatteryUnrestricted,
                             onRequestCompanionLink = onRequestCompanionLink,
@@ -254,9 +279,19 @@ fun AppleQuickyScreen(
                 }
 
                 // CAMADA 2: Floating Glass Navigation (Top Bar + Floating Capsule Tab Bar)
+                val topTitle = when (activeTab) {
+                    AppleTab.CONTROLS -> state.modelTitle
+                    AppleTab.SOUND -> "Som"
+                    AppleTab.SETTINGS -> "Ajustes"
+                }
+                val topSubtitle = when (activeTab) {
+                    AppleTab.CONTROLS -> state.statusMessage
+                    AppleTab.SOUND -> "Equalizador · ${state.eqPreset.label}"
+                    AppleTab.SETTINGS -> "v${BuildConfig.VERSION_NAME}"
+                }
                 AppleFloatingTopBar(
-                    title = if (activeTab == AppleTab.CONTROLS) state.modelTitle else "Ajustes",
-                    subtitle = if (activeTab == AppleTab.CONTROLS) state.statusMessage else "v${BuildConfig.VERSION_NAME}",
+                    title = topTitle,
+                    subtitle = topSubtitle,
                     connected = state.connected,
                     showConnectedDot = activeTab == AppleTab.CONTROLS,
                     showRefresh = activeTab == AppleTab.CONTROLS && state.connected,
@@ -487,7 +522,7 @@ private fun AppleFloatingTabBar(
             cornerRadius = 32.dp,
             specular = 0.50f,
             modifier = Modifier
-                .width(248.dp)
+                .width(308.dp)
                 .height(54.dp)
         ) {
             BoxWithConstraints(
@@ -1141,8 +1176,11 @@ private fun AppleSettingsList(
     updateStatusText: String,
     batteryUnrestricted: Boolean,
     companionLinked: Boolean,
+    overlayPermissionGranted: Boolean,
     isXiaomiDevice: Boolean,
     companionStatusNote: String?,
+    onToggleAirpodsPopup: (Boolean) -> Unit,
+    onRequestOverlayPermission: () -> Unit,
     onToggleNotifications: (Boolean) -> Unit,
     onRequestBatteryUnrestricted: () -> Unit,
     onRequestCompanionLink: () -> Unit,
@@ -1249,6 +1287,45 @@ private fun AppleSettingsList(
                                 text = "Abrir",
                                 prominent = false,
                                 onClick = onOpenXiaomiAutostart
+                            )
+                        }
+                    )
+                }
+            }
+        }
+
+        // AirPods-Style Pop-up Card
+        item(key = "airpods_popup") {
+            PortalCard {
+                PortalListRow(
+                    title = "Pop-up estilo AirPods",
+                    subtitle = "Mostra bateria e controle rápido de ruído ao conectar",
+                    leading = {
+                        AppleIconBadge(backgroundColor = colors.accent) {
+                            Text("🎧", fontSize = 13.sp)
+                        }
+                    },
+                    trailing = {
+                        AppleToggle(
+                            checked = state.airpodsPopupEnabled,
+                            onCheckedChange = onToggleAirpodsPopup
+                        )
+                    }
+                )
+                if (state.airpodsPopupEnabled) {
+                    PortalDivider(startIndent = 42.dp)
+                    PortalListRow(
+                        title = "Sobrepor outros apps",
+                        subtitle = if (overlayPermissionGranted) {
+                            "Permitido · pop-up flutuante em estilo iOS ativo"
+                        } else {
+                            "Sem permissão · usando notificação rápida como alternativa"
+                        },
+                        trailing = {
+                            ApplePillButton(
+                                text = if (overlayPermissionGranted) "Ativo" else "Permitir",
+                                prominent = !overlayPermissionGranted,
+                                onClick = onRequestOverlayPermission
                             )
                         }
                     )
@@ -1550,5 +1627,447 @@ private fun AppleNoiseSlider(
                 inactiveTickColor = colors.tertiaryLabel
             )
         )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AppleSoundList(
+    listState: LazyListState,
+    state: QcyUiState,
+    collapseProgress: Float,
+    onSelectEqPreset: (QcyEqPreset) -> Unit,
+    onSetCustomEqBands: (List<Int>) -> Unit,
+    onSetSoundBalance: (Int) -> Unit
+) {
+    val colors = LocalAppleColors.current
+    val haptics = rememberAppleHaptics()
+    val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val navBarBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
+    // Local draft list updated instantaneously during drag; committed to BLE strictly on finish
+    var draftBands by remember(state.eqBands, state.eqPreset) {
+        mutableStateOf(state.eqBands)
+    }
+
+    LazyColumn(
+        state = listState,
+        modifier = Modifier
+            .fillMaxSize()
+            .appleScrollEdgeHaptics(listState, haptics),
+        contentPadding = PaddingValues(
+            start = 16.dp,
+            end = 16.dp,
+            top = statusBarTop + 18.dp,
+            bottom = navBarBottom + 92.dp
+        ),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        item(key = "sound_header") {
+            val headerAlpha = (1f - collapseProgress * 1.15f).coerceIn(0f, 1f)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+                    .graphicsLayer { alpha = headerAlpha }
+            ) {
+                Text(
+                    text = "Som",
+                    style = AppleTypography.largeTitle,
+                    color = colors.label
+                )
+            }
+        }
+
+        // Equalizer Card
+        item(key = "eq_card") {
+            PortalCard {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                        Text(
+                            text = "Equalizador",
+                            style = AppleTypography.headline,
+                            color = colors.label
+                        )
+                        Text(
+                            text = if (state.connected) {
+                                "10 bandas · Perfil: ${state.eqPreset.label}"
+                            } else {
+                                "Modo pré-visualização · conecte os fones para aplicar"
+                            },
+                            style = AppleTypography.caption1,
+                            color = colors.secondaryLabel
+                        )
+                    }
+                    if (draftBands.any { it != 0 } || state.eqPreset != QcyEqPreset.DEFAULT) {
+                        ApplePillButton(
+                            text = "Zerar",
+                            prominent = false,
+                            onClick = {
+                                draftBands = QcyEqPreset.DEFAULT.defaultBands
+                                onSelectEqPreset(QcyEqPreset.DEFAULT)
+                            }
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                AppleEqCurvePreview(
+                    bands = draftBands,
+                    accentColor = colors.accent,
+                    gridColor = colors.divider,
+                    zeroLineColor = colors.secondaryLabel.copy(alpha = 0.35f),
+                    containerColor = colors.systemFill.copy(alpha = 0.55f)
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    QcyEqPreset.entries.forEach { preset ->
+                        val selected = state.eqPreset == preset
+                        Box(
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (selected) colors.accent else colors.systemFill)
+                                .applePressScale {
+                                    if (!selected) {
+                                        haptics.selection()
+                                    } else {
+                                        haptics.impactLight()
+                                    }
+                                    if (preset != QcyEqPreset.CUSTOM) {
+                                        draftBands = preset.defaultBands
+                                    }
+                                    onSelectEqPreset(preset)
+                                }
+                                .padding(horizontal = 13.dp, vertical = 7.dp)
+                        ) {
+                            Text(
+                                text = preset.label,
+                                style = AppleTypography.caption1.copy(
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium
+                                ),
+                                color = if (selected) Color.White else colors.label,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+                PortalDivider()
+                Spacer(modifier = Modifier.height(8.dp))
+
+                QcyProtocol.EQ_BAND_LABELS.forEachIndexed { idx, freqLabel ->
+                    val committedVal = (state.eqBands.getOrNull(idx) ?: 0)
+                        .coerceIn(QcyProtocol.EQ_MIN_DB, QcyProtocol.EQ_MAX_DB)
+                    val currentDraft = (draftBands.getOrNull(idx) ?: committedVal)
+                        .coerceIn(QcyProtocol.EQ_MIN_DB, QcyProtocol.EQ_MAX_DB)
+
+                    AppleEqBandRow(
+                        freqLabel = freqLabel,
+                        dbValue = currentDraft,
+                        bandIndex = idx,
+                        onDraftChange = { newDb ->
+                            val updated = draftBands.toMutableList()
+                            if (updated.size == QcyProtocol.EQ_BAND_FREQS.size) {
+                                updated[idx] = newDb
+                                draftBands = updated
+                            }
+                        },
+                        onCommit = {
+                            onSetCustomEqBands(draftBands)
+                        }
+                    )
+                }
+            }
+        }
+
+        // Channel Balance L/R Card
+        item(key = "balance_card") {
+            AppleSoundBalanceCard(
+                soundBalance = state.soundBalance,
+                connected = state.connected,
+                onCommitBalance = onSetSoundBalance
+            )
+        }
+    }
+}
+
+@Composable
+private fun AppleEqCurvePreview(
+    bands: List<Int>,
+    accentColor: Color,
+    gridColor: Color,
+    zeroLineColor: Color,
+    containerColor: Color
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(104.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(containerColor)
+            .padding(horizontal = 12.dp, vertical = 14.dp)
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            if (w <= 0f || h <= 0f || bands.size < 2) return@Canvas
+
+            val midY = h * 0.5f
+            drawLine(
+                color = gridColor,
+                start = Offset(0f, h * 0.15f),
+                end = Offset(w, h * 0.15f),
+                strokeWidth = 1.dp.toPx()
+            )
+            drawLine(
+                color = zeroLineColor,
+                start = Offset(0f, midY),
+                end = Offset(w, midY),
+                strokeWidth = 1.2.dp.toPx()
+            )
+            drawLine(
+                color = gridColor,
+                start = Offset(0f, h * 0.85f),
+                end = Offset(w, h * 0.85f),
+                strokeWidth = 1.dp.toPx()
+            )
+
+            val span = (QcyProtocol.EQ_MAX_DB - QcyProtocol.EQ_MIN_DB).coerceAtLeast(1)
+            val points = bands.mapIndexed { idx, db ->
+                val x = (idx.toFloat() / (bands.size - 1)) * w
+                val norm = ((db - QcyProtocol.EQ_MIN_DB).toFloat() / span).coerceIn(0f, 1f)
+                val y = h - norm * h
+                Offset(x, y)
+            }
+
+            val linePath = Path().apply {
+                moveTo(points.first().x, points.first().y)
+                for (i in 0 until points.size - 1) {
+                    val p0 = points[i]
+                    val p1 = points[i + 1]
+                    val cx = (p0.x + p1.x) * 0.5f
+                    cubicTo(cx, p0.y, cx, p1.y, p1.x, p1.y)
+                }
+            }
+
+            val fillPath = Path().apply {
+                addPath(linePath)
+                lineTo(points.last().x, h)
+                lineTo(points.first().x, h)
+                close()
+            }
+
+            drawPath(
+                path = fillPath,
+                brush = Brush.verticalGradient(
+                    colors = listOf(accentColor.copy(alpha = 0.28f), Color.Transparent),
+                    startY = 0f,
+                    endY = h
+                )
+            )
+            drawPath(
+                path = linePath,
+                color = accentColor,
+                style = Stroke(width = 2.4.dp.toPx(), cap = StrokeCap.Round)
+            )
+
+            points.forEach { pt ->
+                drawCircle(
+                    color = accentColor,
+                    radius = 3.2.dp.toPx(),
+                    center = pt
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppleEqBandRow(
+    freqLabel: String,
+    dbValue: Int,
+    bandIndex: Int,
+    onDraftChange: (Int) -> Unit,
+    onCommit: () -> Unit
+) {
+    val colors = LocalAppleColors.current
+    val haptics = rememberAppleHaptics()
+    var draggingRaw by remember(bandIndex) { mutableStateOf<Float?>(null) }
+    val displayDb = (draggingRaw?.roundToInt() ?: dbValue)
+        .coerceIn(QcyProtocol.EQ_MIN_DB, QcyProtocol.EQ_MAX_DB)
+
+    LaunchedEffect(displayDb, draggingRaw != null) {
+        if (draggingRaw != null) {
+            if (displayDb == 0) {
+                haptics.selection()
+            } else {
+                haptics.tick()
+            }
+        }
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = freqLabel,
+            style = AppleTypography.caption1.copy(fontWeight = FontWeight.Medium).tabular(),
+            color = colors.secondaryLabel,
+            modifier = Modifier.width(46.dp)
+        )
+        Slider(
+            value = draggingRaw ?: dbValue.toFloat(),
+            onValueChange = { raw ->
+                draggingRaw = raw
+                val rounded = raw.roundToInt().coerceIn(QcyProtocol.EQ_MIN_DB, QcyProtocol.EQ_MAX_DB)
+                if (rounded != dbValue) {
+                    onDraftChange(rounded)
+                }
+            },
+            onValueChangeFinished = {
+                val finalDb = (draggingRaw?.roundToInt() ?: dbValue)
+                    .coerceIn(QcyProtocol.EQ_MIN_DB, QcyProtocol.EQ_MAX_DB)
+                draggingRaw = null
+                onDraftChange(finalDb)
+                haptics.impactLight()
+                onCommit()
+            },
+            valueRange = QcyProtocol.EQ_MIN_DB.toFloat()..QcyProtocol.EQ_MAX_DB.toFloat(),
+            steps = (QcyProtocol.EQ_MAX_DB - QcyProtocol.EQ_MIN_DB - 1).coerceAtLeast(0),
+            modifier = Modifier.weight(1f),
+            colors = SliderDefaults.colors(
+                thumbColor = Color.White,
+                activeTrackColor = colors.accent,
+                inactiveTrackColor = colors.systemFill,
+                activeTickColor = Color.White.copy(alpha = 0.55f),
+                inactiveTickColor = colors.tertiaryLabel
+            )
+        )
+        Text(
+            text = when {
+                displayDb > 0 -> "+$displayDb dB"
+                displayDb < 0 -> "$displayDb dB"
+                else -> "0 dB"
+            },
+            style = AppleTypography.caption1.copy(fontWeight = FontWeight.SemiBold).tabular(),
+            color = if (displayDb != 0) colors.accent else colors.secondaryLabel,
+            modifier = Modifier.width(44.dp)
+        )
+    }
+}
+
+@Composable
+private fun AppleSoundBalanceCard(
+    soundBalance: Int,
+    connected: Boolean,
+    onCommitBalance: (Int) -> Unit
+) {
+    val colors = LocalAppleColors.current
+    val haptics = rememberAppleHaptics()
+    var draggingValue by remember(soundBalance) { mutableStateOf<Float?>(null) }
+    val displayBalance = (draggingValue?.roundToInt() ?: soundBalance).coerceIn(0, 100)
+
+    LaunchedEffect(displayBalance, draggingValue != null) {
+        if (draggingValue != null) {
+            if (displayBalance == 50) {
+                haptics.selection()
+            } else {
+                haptics.tick()
+            }
+        }
+    }
+
+    val balanceLabel = when {
+        displayBalance == 50 -> "Centro"
+        displayBalance < 50 -> "Esquerdo · ${50 - displayBalance}%"
+        else -> "Direito · ${displayBalance - 50}%"
+    }
+
+    PortalCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                Text(
+                    text = "Balanço de canais",
+                    style = AppleTypography.headline,
+                    color = colors.label
+                )
+                Text(
+                    text = if (connected) balanceLabel else "$balanceLabel · conecte para aplicar",
+                    style = AppleTypography.caption1.copy(fontWeight = FontWeight.SemiBold).tabular(),
+                    color = if (displayBalance == 50) colors.secondaryLabel else colors.accent
+                )
+            }
+            if (displayBalance != 50) {
+                ApplePillButton(
+                    text = "Centralizar",
+                    prominent = false,
+                    onClick = {
+                        draggingValue = null
+                        haptics.selection()
+                        onCommitBalance(50)
+                    }
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        Slider(
+            value = draggingValue ?: soundBalance.toFloat(),
+            onValueChange = { draggingValue = it },
+            onValueChangeFinished = {
+                val target = (draggingValue?.roundToInt() ?: soundBalance).coerceIn(0, 100)
+                draggingValue = null
+                if (target != soundBalance) {
+                    haptics.impactLight()
+                    onCommitBalance(target)
+                }
+            },
+            valueRange = 0f..100f,
+            colors = SliderDefaults.colors(
+                thumbColor = Color.White,
+                activeTrackColor = colors.accent,
+                inactiveTrackColor = colors.systemFill
+            )
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "Esquerdo",
+                style = AppleTypography.caption2,
+                color = colors.secondaryLabel
+            )
+            Text(
+                text = "Centro",
+                style = AppleTypography.caption2,
+                color = colors.secondaryLabel
+            )
+            Text(
+                text = "Direito",
+                style = AppleTypography.caption2,
+                color = colors.secondaryLabel
+            )
+        }
     }
 }

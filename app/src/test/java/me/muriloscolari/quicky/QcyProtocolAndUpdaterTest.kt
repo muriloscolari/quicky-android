@@ -2,6 +2,7 @@ package me.muriloscolari.quicky
 
 import me.muriloscolari.quicky.ble.AncCycleMode
 import me.muriloscolari.quicky.ble.AncSubScene
+import me.muriloscolari.quicky.ble.QcyEqPreset
 import me.muriloscolari.quicky.ble.QcyProtocol
 import me.muriloscolari.quicky.update.AppUpdater
 import org.junit.Assert.assertArrayEquals
@@ -112,5 +113,41 @@ class QcyProtocolAndUpdaterTest {
         assertEquals(196866, QcyProtocol.ambientCmdIdForLevel(3))
         assertEquals("Ambiente · 3/7", QcyProtocol.formatAncShortLabel(196866))
         assertEquals("OFF", QcyProtocol.formatAncShortLabel(AncCycleMode.OFF.meloBudsCmdId))
+    }
+
+    @Test
+    fun soundBalanceCommandFramesAndClamps() {
+        assertArrayEquals(
+            byteArrayOf(0xFF.toByte(), 0x03, 0x16, 0x01, 50),
+            QcyProtocol.buildSoundBalanceCommand(50)
+        )
+        assertArrayEquals(
+            byteArrayOf(0xFF.toByte(), 0x03, 0x16, 0x01, 0),
+            QcyProtocol.buildSoundBalanceCommand(-12)
+        )
+        assertArrayEquals(
+            byteArrayOf(0xFF.toByte(), 0x03, 0x16, 0x01, 100),
+            QcyProtocol.buildSoundBalanceCommand(140)
+        )
+    }
+
+    @Test
+    fun eqDirectAndParametricRoundTrip() {
+        val sampleBands = listOf(-8, -4, 0, 2, 5, 8, -1, 3, -6, 12) // 12 clamps to 8
+        val direct = QcyProtocol.buildEqDirectPayload(QcyEqPreset.CUSTOM.eqType, sampleBands)
+        assertEquals(11, direct.size)
+        val parsedDirect = QcyProtocol.parseEqDirectPayload(direct)
+        assertNotNull(parsedDirect)
+        assertEquals(QcyEqPreset.CUSTOM, parsedDirect!!.preset)
+        assertEquals(listOf(-8, -4, 0, 2, 5, 8, -1, 3, -6, 8), parsedDirect.bands)
+
+        val v2Packet = QcyProtocol.buildEqParametricCommand(QcyEqPreset.HEAVY_BASS.eqType, QcyEqPreset.HEAVY_BASS.defaultBands, isV2 = true)
+        assertEquals(0xFF.toByte(), v2Packet[0])
+        assertEquals(0x22.toByte(), v2Packet[2])
+        val paramsSlice = v2Packet.copyOfRange(4, v2Packet.size)
+        val parsedParam = QcyProtocol.parseEqParametricPayload(paramsSlice, isV2 = true)
+        assertNotNull(parsedParam)
+        assertEquals(QcyEqPreset.HEAVY_BASS, parsedParam!!.preset)
+        assertEquals(QcyEqPreset.HEAVY_BASS.defaultBands, parsedParam.bands)
     }
 }

@@ -70,6 +70,34 @@ enum class QcyKeyAction(val funcId: Int, val label: String) {
     }
 }
 
+enum class QcyEqPreset(val eqType: Int, val label: String, val defaultBands: List<Int>) {
+    SPATIAL(0, "Espacial", listOf(1, 2, 1, 0, -1, 0, 2, 4, 3, 2)),
+    DEFAULT(1, "Padrão", listOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)),
+    POP(2, "Pop", listOf(1, 2, 1, 0, 1, 2, 3, 2, 1, 1)),
+    HEAVY_BASS(3, "Graves", listOf(6, 5, 4, 2, 0, 0, 0, 1, 1, 0)),
+    ROCK(4, "Rock", listOf(4, 3, 2, 0, -1, 0, 2, 3, 4, 3)),
+    SOFT(5, "Suave", listOf(0, 1, 2, 2, 1, 0, -1, -2, -2, -2)),
+    CLASSIC(6, "Clássico", listOf(0, 1, 2, 2, 1, 0, 1, 2, 3, 2)),
+    CUSTOM(7, "Personalizado", listOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+
+    companion object {
+        fun fromEqType(eqType: Int): QcyEqPreset =
+            entries.firstOrNull { it.eqType == eqType } ?: CUSTOM
+    }
+}
+
+enum class QcyEqTransport {
+    DIRECT_000B,
+    PARAMETRIC_V1,
+    PARAMETRIC_V2
+}
+
+data class QcyEqSettings(
+    val preset: QcyEqPreset,
+    val bands: List<Int>,
+    val transport: QcyEqTransport? = null
+)
+
 data class QcyBattery(
     val left: Int = -1,
     val right: Int = -1,
@@ -93,10 +121,15 @@ object QcyProtocol {
     const val AMBIENT_START_CMD_ID = 196864
     const val AMBIENT_END_CMD_ID = 196870
     const val AMBIENT_LEVEL_COUNT = AMBIENT_END_CMD_ID - AMBIENT_START_CMD_ID + 1
+    const val EQ_MIN_DB = -8
+    const val EQ_MAX_DB = 8
+    val EQ_BAND_FREQS = listOf(31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
+    val EQ_BAND_LABELS = listOf("31 Hz", "62 Hz", "125 Hz", "250 Hz", "500 Hz", "1 kHz", "2 kHz", "4 kHz", "8 kHz", "16 kHz")
 
     val SERVICE_UUID: UUID = UUID.fromString("0000a001-0000-1000-8000-00805f9b34fb")
     val COMMAND_UUID: UUID = UUID.fromString("00001001-0000-1000-8000-00805f9b34fb")
     val NOTIFY_UUID: UUID = UUID.fromString("00001002-0000-1000-8000-00805f9b34fb")
+    val EQ_UUID: UUID = UUID.fromString("0000000b-0000-1000-8000-00805f9b34fb")
     val KEY_FUNC_UUID: UUID = UUID.fromString("0000000d-0000-1000-8000-00805f9b34fb")
     val VERSION_UUID: UUID = UUID.fromString("00000007-0000-1000-8000-00805f9b34fb")
     val BATTERY_UUID: UUID = UUID.fromString("00000008-0000-1000-8000-00805f9b34fb")
@@ -148,6 +181,103 @@ object QcyProtocol {
     fun buildLdacCommand(enabled: Boolean): ByteArray {
         val state: Byte = if (enabled) 0x01 else 0x02
         return packCommand(0x23, byteArrayOf(state))
+    }
+
+    /**
+     * Command 0x16 — Sound Balance (0 = Full Left, 50 = Center, 100 = Full Right).
+     */
+    fun buildSoundBalanceCommand(leftBalance: Int): ByteArray {
+        val clamped = leftBalance.coerceIn(0, 100)
+        return packCommand(0x16, byteArrayOf((clamped and 0xFF).toByte()))
+    }
+
+    /**
+     * Direct EQ write payload (characteristic 0000000B, without 0xFF framing):
+     * [eqType, b0, b1, ..., b9] where each band is signed dB clamped to [-8, 8].
+     */
+    fun buildEqDirectPayload(eqType: Int, bands: List<Int>): ByteArray {
+        val count = EQ_BAND_FREQS.size
+        val out = ByteArray(1 + count)
+        out[0] = (eqType and 0xFF).toByte()
+        for (i in 0 until count) {
+            val db = (bands.getOrNull(i) ?: 0).coerceIn(EQ_MIN_DB, EQ_MAX_DB)
+            out[1 + i] = db.toByte()
+        }
+        return out
+    }
+
+    fun parseEqDirectPayload(bytes: ByteArray?): QcyEqSettings? {
+        if (bytes == null || bytes.size < 2) return null
+        val eqType = bytes[0].toInt() and 0xFF
+        val count = EQ_BAND_FREQS.size
+        val bands = List(count) { idx ->
+            val raw = bytes.getOrNull(1 + idx)?.toInt() ?: 0 // signed Byte (-128..127)
+            raw.coerceIn(EQ_MIN_DB, EQ_MAX_DB)
+        }
+        return QcyEqSettings(
+            preset = QcyEqPreset.fromEqType(eqType),
+            bands = bands,
+            transport = QcyEqTransport.DIRECT_000B
+        )
+    }
+
+    /**
+     * Command 0x20 (v1) / 0x22 (v2) — Parametric EQ write via 00001001.
+     */
+    fun buildEqParametricCommand(
+        eqType: Int,
+        bands: List<Int>,
+        isV2: Boolean = false
+    ): ByteArray {
+        val freqs = EQ_BAND_FREQS
+        val stride = if (isV2) 7 else 6
+        val params = ByteArray(3 + freqs.size * stride)
+        params[0] = (eqType and 0xFF).toByte()
+        // masterGain = 0 (LE 16-bit)
+        params[1] = 0
+        params[2] = 0
+        var off = 3
+        for (i in freqs.indices) {
+            val freq = freqs[i]
+            val gainScaled = ((bands.getOrNull(i) ?: 0).coerceIn(EQ_MIN_DB, EQ_MAX_DB) * 100)
+                .coerceIn(-1270, 1270)
+            val qScaled = 100 // Q = 1.00
+            params[off] = (freq and 0xFF).toByte()
+            params[off + 1] = ((freq ushr 8) and 0xFF).toByte()
+            params[off + 2] = (gainScaled and 0xFF).toByte()
+            params[off + 3] = ((gainScaled ushr 8) and 0xFF).toByte()
+            params[off + 4] = (qScaled and 0xFF).toByte()
+            params[off + 5] = ((qScaled ushr 8) and 0xFF).toByte()
+            if (isV2) {
+                params[off + 6] = 0x02 // peaking band
+            }
+            off += stride
+        }
+        return packCommand(if (isV2) 0x22 else 0x20, params)
+    }
+
+    fun parseEqParametricPayload(params: ByteArray?, isV2: Boolean): QcyEqSettings? {
+        if (params == null || params.size < 3) return null
+        val eqType = params[0].toInt() and 0xFF
+        val stride = if (isV2) 7 else 6
+        val count = EQ_BAND_FREQS.size
+        val bands = MutableList(count) { 0 }
+        var off = 3
+        var bandIdx = 0
+        while (off + stride <= params.size && bandIdx < count) {
+            val lo = params[off + 2].toInt() and 0xFF
+            val hi = params[off + 3].toInt()
+            val signedGain = (hi shl 8) or lo
+            bands[bandIdx] = (signedGain / 100f).let { kotlin.math.round(it).toInt() }
+                .coerceIn(EQ_MIN_DB, EQ_MAX_DB)
+            off += stride
+            bandIdx++
+        }
+        return QcyEqSettings(
+            preset = QcyEqPreset.fromEqType(eqType),
+            bands = bands,
+            transport = if (isV2) QcyEqTransport.PARAMETRIC_V2 else QcyEqTransport.PARAMETRIC_V1
+        )
     }
 
     /**

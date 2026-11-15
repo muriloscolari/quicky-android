@@ -94,11 +94,15 @@ class MainActivity : ComponentActivity() {
             var companionLinked by remember {
                 mutableStateOf(QcyBleManager.getCompanionAssociations(this@MainActivity).isNotEmpty())
             }
+            var overlayPermissionGranted by remember {
+                mutableStateOf(Settings.canDrawOverlays(this@MainActivity))
+            }
             var companionStatusNote by remember { mutableStateOf<String?>(null) }
 
             val refreshBgState = {
                 batteryUnrestricted = QcyBleManager.isIgnoringBatteryOptimizations(this@MainActivity)
                 companionLinked = QcyBleManager.getCompanionAssociations(this@MainActivity).isNotEmpty()
+                overlayPermissionGranted = Settings.canDrawOverlays(this@MainActivity)
                 if (companionLinked) {
                     QcyBleManager.ensureObservingCompanionPresence(applicationContext)
                 }
@@ -163,6 +167,7 @@ class MainActivity : ComponentActivity() {
                     updateStatusText = updateStatusText,
                     batteryUnrestricted = batteryUnrestricted,
                     companionLinked = companionLinked,
+                    overlayPermissionGranted = overlayPermissionGranted,
                     isXiaomiDevice = QcyBleManager.isXiaomiDevice(),
                     companionStatusNote = companionStatusNote,
                     onScanClick = { QcyBleManager.startScan() },
@@ -177,9 +182,14 @@ class MainActivity : ComponentActivity() {
                     onToggleLowLatency = { enabled -> QcyBleManager.setLowLatency(enabled) },
                     onToggleLdac = { enabled -> QcyBleManager.setLdacEnabled(enabled) },
                     onToggleDualConnect = { enabled -> QcyBleManager.setDualConnectEnabled(enabled) },
+                    onSelectEqPreset = { preset -> QcyBleManager.setEqPreset(preset) },
+                    onSetCustomEqBands = { bands -> QcyBleManager.setCustomEqBands(bands) },
+                    onSetSoundBalance = { value -> QcyBleManager.setSoundBalance(value) },
                     onSetKeyMapping = { keyId, funcId -> QcyBleManager.setKeyMapping(keyId, funcId) },
                     onStartFindEarbuds = { side -> QcyBleManager.startFindingEarbuds(side) },
                     onStopFindEarbuds = { QcyBleManager.stopFindingEarbuds() },
+                    onToggleAirpodsPopup = { enabled -> QcyBleManager.setAirpodsPopupEnabled(enabled) },
+                    onRequestOverlayPermission = { openOverlayPermissionSettings() },
                     onToggleNotifications = { enabled ->
                         if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                             ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -252,6 +262,23 @@ class MainActivity : ComponentActivity() {
             QcyControlService.start(this)
         } else {
             permissionLauncher.launch(needed.toTypedArray())
+        }
+    }
+
+    private fun openOverlayPermissionSettings() {
+        val intent = Intent(
+            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:$packageName")
+        )
+        runCatching { startActivity(intent) }.onFailure {
+            runCatching {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:$packageName")
+                    )
+                )
+            }
         }
     }
 

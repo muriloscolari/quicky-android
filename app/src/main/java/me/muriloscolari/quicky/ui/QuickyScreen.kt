@@ -67,6 +67,7 @@ import me.muriloscolari.quicky.BuildConfig
 import me.muriloscolari.quicky.ble.AncCycleMode
 import me.muriloscolari.quicky.ble.AncSubScene
 import me.muriloscolari.quicky.ble.FindEarbudSide
+import me.muriloscolari.quicky.ble.QcyEqPreset
 import me.muriloscolari.quicky.ble.QcyKeyAction
 import me.muriloscolari.quicky.ble.QcyKeyId
 import me.muriloscolari.quicky.ble.QcyProtocol
@@ -91,6 +92,7 @@ fun QuickyScreen(
     updateStatusText: String,
     batteryUnrestricted: Boolean,
     companionLinked: Boolean,
+    overlayPermissionGranted: Boolean,
     isXiaomiDevice: Boolean,
     companionStatusNote: String?,
     onScanClick: () -> Unit,
@@ -105,9 +107,14 @@ fun QuickyScreen(
     onToggleLowLatency: (Boolean) -> Unit,
     onToggleLdac: (Boolean) -> Unit,
     onToggleDualConnect: (Boolean) -> Unit,
+    onSelectEqPreset: (QcyEqPreset) -> Unit,
+    onSetCustomEqBands: (List<Int>) -> Unit,
+    onSetSoundBalance: (Int) -> Unit,
     onSetKeyMapping: (Int, Int) -> Unit,
     onStartFindEarbuds: (FindEarbudSide) -> Unit,
     onStopFindEarbuds: () -> Unit,
+    onToggleAirpodsPopup: (Boolean) -> Unit,
+    onRequestOverlayPermission: () -> Unit,
     onToggleNotifications: (Boolean) -> Unit,
     onRequestBatteryUnrestricted: () -> Unit,
     onRequestCompanionLink: () -> Unit,
@@ -127,6 +134,7 @@ fun QuickyScreen(
             updateStatusText = updateStatusText,
             batteryUnrestricted = batteryUnrestricted,
             companionLinked = companionLinked,
+            overlayPermissionGranted = overlayPermissionGranted,
             isXiaomiDevice = isXiaomiDevice,
             companionStatusNote = companionStatusNote,
             onScanClick = onScanClick,
@@ -141,9 +149,14 @@ fun QuickyScreen(
             onToggleLowLatency = onToggleLowLatency,
             onToggleLdac = onToggleLdac,
             onToggleDualConnect = onToggleDualConnect,
+            onSelectEqPreset = onSelectEqPreset,
+            onSetCustomEqBands = onSetCustomEqBands,
+            onSetSoundBalance = onSetSoundBalance,
             onSetKeyMapping = onSetKeyMapping,
             onStartFindEarbuds = onStartFindEarbuds,
             onStopFindEarbuds = onStopFindEarbuds,
+            onToggleAirpodsPopup = onToggleAirpodsPopup,
+            onRequestOverlayPermission = onRequestOverlayPermission,
             onToggleNotifications = onToggleNotifications,
             onRequestBatteryUnrestricted = onRequestBatteryUnrestricted,
             onRequestCompanionLink = onRequestCompanionLink,

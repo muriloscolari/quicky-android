@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import me.muriloscolari.quicky.service.QcyAncTileService
 import me.muriloscolari.quicky.service.QcyControlService
+import me.muriloscolari.quicky.ui.AirPodsPopupController
 import me.muriloscolari.quicky.update.UpdateSource
 import kotlin.math.PI
 import kotlin.math.sin
@@ -68,6 +69,10 @@ data class QcyUiState(
     val ldacEnabled: Boolean = false,
     val dualConnectEnabled: Boolean = false,
     val keyMappings: Map<Int, Int> = emptyMap(),
+    val eqPreset: QcyEqPreset = QcyEqPreset.DEFAULT,
+    val eqBands: List<Int> = QcyEqPreset.DEFAULT.defaultBands,
+    val soundBalance: Int = 50,
+    val airpodsPopupEnabled: Boolean = true,
     val notificationsEnabled: Boolean = false,
     val findingSide: FindEarbudSide? = null,
     val uiStyle: UiStyle = UiStyle.APPLE_LIQUID_GLASS,
@@ -94,6 +99,10 @@ object QcyBleManager {
     private const val KEY_ANC_CYCLE_MODE = "last_anc_cycle_mode"
     private const val KEY_PREFERRED_ANC_CMD = "preferred_anc_cmd_id"
     private const val KEY_PREFERRED_AMBIENT_CMD = "preferred_ambient_cmd_id"
+    private const val KEY_SOUND_BALANCE = "sound_balance"
+    private const val KEY_EQ_PRESET = "eq_preset"
+    private const val KEY_EQ_BANDS = "eq_bands"
+    private const val KEY_AIRPODS_POPUP = "airpods_popup_enabled"
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val _state = MutableStateFlow(QcyUiState())
@@ -103,8 +112,10 @@ object QcyBleManager {
     private var bluetoothGatt: BluetoothGatt? = null
     private var commandChar: BluetoothGattCharacteristic? = null
     private var keyFuncChar: BluetoothGattCharacteristic? = null
+    private var eqChar: BluetoothGattCharacteristic? = null
     private var batteryChar: BluetoothGattCharacteristic? = null
     private var versionChar: BluetoothGattCharacteristic? = null
+    private var detectedEqTransport: QcyEqTransport? = null
     private var isScanning = false
     private val scannedMap = LinkedHashMap<String, ScannedQcyDevice>()
 
@@ -174,6 +185,16 @@ object QcyBleManager {
         val savedPrefAmbient = prefs.getInt(KEY_PREFERRED_AMBIENT_CMD, AncCycleMode.AMBIENT.meloBudsCmdId)
             .takeIf { it in QcyProtocol.AMBIENT_START_CMD_ID..QcyProtocol.AMBIENT_END_CMD_ID }
             ?: AncCycleMode.AMBIENT.meloBudsCmdId
+        val savedBalance = prefs.getInt(KEY_SOUND_BALANCE, 50).coerceIn(0, 100)
+        val savedEqPresetName = prefs.getString(KEY_EQ_PRESET, QcyEqPreset.DEFAULT.name) ?: QcyEqPreset.DEFAULT.name
+        val savedEqPreset = runCatching { QcyEqPreset.valueOf(savedEqPresetName) }.getOrDefault(QcyEqPreset.DEFAULT)
+        val savedEqBandsRaw = prefs.getString(KEY_EQ_BANDS, null)
+        val savedEqBands = savedEqBandsRaw
+            ?.split(",")
+            ?.mapNotNull { it.trim().toIntOrNull()?.coerceIn(QcyProtocol.EQ_MIN_DB, QcyProtocol.EQ_MAX_DB) }
+            ?.takeIf { it.size == QcyProtocol.EQ_BAND_FREQS.size }
+            ?: savedEqPreset.defaultBands
+        val airpodsPopupEnabled = prefs.getBoolean(KEY_AIRPODS_POPUP, true)
 
         val style = runCatching { UiStyle.valueOf(styleName) }.getOrDefault(UiStyle.APPLE_LIQUID_GLASS)
         val source = runCatching { UpdateSource.valueOf(sourceName) }.getOrDefault(UpdateSource.FORGEJO)
@@ -197,7 +218,11 @@ object QcyBleManager {
                 ancCycleMode = savedAnc,
                 ancCmdId = initialCmdId,
                 preferredAncCmdId = savedPrefAnc,
-                preferredAmbientCmdId = savedPrefAmbient
+                preferredAmbientCmdId = savedPrefAmbient,
+                eqPreset = savedEqPreset,
+                eqBands = savedEqBands,
+                soundBalance = savedBalance,
+                airpodsPopupEnabled = airpodsPopupEnabled
             )
         }
 
@@ -675,8 +700,11 @@ object QcyBleManager {
         bluetoothGatt = null
         commandChar = null
         keyFuncChar = null
+        eqChar = null
         batteryChar = null
         versionChar = null
+        detectedEqTransport = null
+        AirPodsPopupController.dismiss()
         _state.update {
             it.copy(
                 connecting = false,
@@ -739,12 +767,14 @@ object QcyBleManager {
 
             commandChar = service.getCharacteristic(QcyProtocol.COMMAND_UUID)
             keyFuncChar = service.getCharacteristic(QcyProtocol.KEY_FUNC_UUID)
+            eqChar = service.getCharacteristic(QcyProtocol.EQ_UUID)
             batteryChar = service.getCharacteristic(QcyProtocol.BATTERY_UUID)
             versionChar = service.getCharacteristic(QcyProtocol.VERSION_UUID)
             val notifyChar = service.getCharacteristic(QcyProtocol.NOTIFY_UUID)
 
             clearGattQueue(notifyFailure = false)
             autoSleepVerifyRetries = 0
+            val wasConnected = _state.value.connected
 
             val addr = gatt.device.address ?: ""
             appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -773,9 +803,10 @@ object QcyBleManager {
                 }
             }
 
-            // 2. Read battery & firmware sequentially
+            // 2. Read battery, firmware, and direct EQ sequentially
             batteryChar?.let { enqueueGattOp(GattOp.ReadChar(it)) }
             versionChar?.let { enqueueGattOp(GattOp.ReadChar(it)) }
+            eqChar?.let { enqueueGattOp(GattOp.ReadChar(it)) }
 
             // 3. CRITICAL FEATURE: Auto-enable Sleep Mode (ignore lateral touch controls) on connect
             val willAutoSleep = _state.value.autoSleepOnConnect
@@ -826,10 +857,22 @@ object QcyBleManager {
                 mainHandler.postDelayed({ notifyConnectWaiters() }, 300L)
             }
 
-            // 5. Query current state (Sleep Mode verification, ANC, Low Latency, LDAC, Dual Connect, Key Functions)
-            listOf(0x10, 0x17, 0x09, 0x23, 0x24, 0x2B).forEach { cmd ->
+            // 5. Query current state (Sleep Mode, ANC, Low Latency, Sound Balance, EQ v1/v2, LDAC, Dual Connect, Key Functions)
+            listOf(0x10, 0x17, 0x09, 0x16, 0x20, 0x22, 0x23, 0x24, 0x2B).forEach { cmd ->
                 commandChar?.let { cChar ->
                     enqueueGattOp(GattOp.WriteChar(cChar, QcyProtocol.buildRequestDataCommand(cmd)))
+                }
+            }
+
+            // 6. Trigger AirPods-style pop-up strictly on disconnected -> connected transition
+            if (!wasConnected && _state.value.airpodsPopupEnabled) {
+                val ctx = appContext
+                if (ctx != null) {
+                    mainHandler.postDelayed({
+                        if (_state.value.connected && _state.value.airpodsPopupEnabled) {
+                            AirPodsPopupController.showOnConnect(ctx)
+                        }
+                    }, 650L)
                 }
             }
 
@@ -909,6 +952,10 @@ object QcyBleManager {
                 val ver = QcyProtocol.parseVersionBytes(bytes) ?: return
                 _state.update { it.copy(firmware = ver) }
             }
+            QcyProtocol.EQ_UUID -> {
+                val parsed = QcyProtocol.parseEqDirectPayload(bytes) ?: return
+                applyParsedEq(parsed)
+            }
             QcyProtocol.NOTIFY_UUID -> {
                 parseNotifyPacket(bytes)
             }
@@ -943,6 +990,10 @@ object QcyBleManager {
                         }, 180L)
                     }
                 }
+                0x16 -> if (paramLen >= 1) {
+                    val balance = (bytes[paramStart].toInt() and 0xFF).coerceIn(0, 100)
+                    persistSoundBalance(balance)
+                }
                 0x17 -> if (paramLen >= 3) {
                     val mode = bytes[paramStart].toInt() and 0xFF
                     val sub = bytes[paramStart + 1].toInt() and 0xFF
@@ -950,6 +1001,20 @@ object QcyBleManager {
                     val packed = (mode shl 16) or (sub shl 8) or noise
                     val cycle = QcyProtocol.modeFromCmdId(packed)
                     persistAncSelection(cmdId = packed, cycleMode = cycle, statusMessage = null)
+                }
+                0x20 -> {
+                    val parsed = QcyProtocol.parseEqParametricPayload(
+                        bytes.copyOfRange(paramStart, paramStart + paramLen),
+                        isV2 = false
+                    )
+                    if (parsed != null) applyParsedEq(parsed)
+                }
+                0x22 -> {
+                    val parsed = QcyProtocol.parseEqParametricPayload(
+                        bytes.copyOfRange(paramStart, paramStart + paramLen),
+                        isV2 = true
+                    )
+                    if (parsed != null) applyParsedEq(parsed)
                 }
                 0x23 -> if (paramLen >= 1) {
                     val enabled = (bytes[paramStart].toInt() and 0xFF) == 0x01
@@ -1104,6 +1169,101 @@ object QcyBleManager {
                 }
             )
         }
+    }
+
+    private fun applyParsedEq(parsed: QcyEqSettings) {
+        if (parsed.transport != null) {
+            detectedEqTransport = parsed.transport
+        }
+        persistEqState(parsed.preset, parsed.bands, statusMessage = null)
+    }
+
+    private fun persistEqState(preset: QcyEqPreset, bands: List<Int>, statusMessage: String?) {
+        val safeBands = List(QcyProtocol.EQ_BAND_FREQS.size) { idx ->
+            (bands.getOrNull(idx) ?: 0).coerceIn(QcyProtocol.EQ_MIN_DB, QcyProtocol.EQ_MAX_DB)
+        }
+        appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()?.apply {
+            putString(KEY_EQ_PRESET, preset.name)
+            putString(KEY_EQ_BANDS, safeBands.joinToString(","))
+            apply()
+        }
+        _state.update {
+            it.copy(
+                eqPreset = preset,
+                eqBands = safeBands,
+                statusMessage = statusMessage ?: it.statusMessage
+            )
+        }
+    }
+
+    private fun persistSoundBalance(balance: Int, statusMessage: String? = null) {
+        val clamped = balance.coerceIn(0, 100)
+        appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()?.apply {
+            putInt(KEY_SOUND_BALANCE, clamped)
+            apply()
+        }
+        _state.update {
+            it.copy(
+                soundBalance = clamped,
+                statusMessage = statusMessage ?: it.statusMessage
+            )
+        }
+    }
+
+    private fun sendEqToDevice(preset: QcyEqPreset, bands: List<Int>, statusLabel: String) {
+        val safeBands = List(QcyProtocol.EQ_BAND_FREQS.size) { idx ->
+            (bands.getOrNull(idx) ?: 0).coerceIn(QcyProtocol.EQ_MIN_DB, QcyProtocol.EQ_MAX_DB)
+        }
+        persistEqState(preset, safeBands, statusMessage = statusLabel)
+
+        val transport = detectedEqTransport
+        val eChar = eqChar
+        if (transport == QcyEqTransport.PARAMETRIC_V2) {
+            writeCommand(QcyProtocol.buildEqParametricCommand(preset.eqType, safeBands, isV2 = true))
+        } else if (transport == QcyEqTransport.PARAMETRIC_V1) {
+            writeCommand(QcyProtocol.buildEqParametricCommand(preset.eqType, safeBands, isV2 = false))
+        } else if (eChar != null) {
+            enqueueGattOp(
+                GattOp.WriteChar(eChar, QcyProtocol.buildEqDirectPayload(preset.eqType, safeBands)) { ok ->
+                    if (!ok) {
+                        _state.update { it.copy(statusMessage = "Falha ao enviar equalizador") }
+                    }
+                }
+            )
+        } else {
+            writeCommand(QcyProtocol.buildEqParametricCommand(preset.eqType, safeBands, isV2 = true))
+        }
+    }
+
+    fun setEqPreset(preset: QcyEqPreset) {
+        val bands = if (preset == QcyEqPreset.CUSTOM) _state.value.eqBands else preset.defaultBands
+        sendEqToDevice(preset, bands, "Equalizador: ${preset.label}")
+    }
+
+    fun setCustomEqBands(bands: List<Int>) {
+        sendEqToDevice(QcyEqPreset.CUSTOM, bands, "Equalizador: Personalizado")
+    }
+
+    fun setSoundBalance(value: Int) {
+        val clamped = value.coerceIn(0, 100)
+        writeCommand(QcyProtocol.buildSoundBalanceCommand(clamped))
+        val desc = when {
+            clamped == 50 -> "Centro"
+            clamped < 50 -> "Esquerdo (${50 - clamped}%)"
+            else -> "Direito (${clamped - 50}%)"
+        }
+        persistSoundBalance(clamped, "Balanço de áudio: $desc")
+    }
+
+    fun setAirpodsPopupEnabled(enabled: Boolean) {
+        appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()?.apply {
+            putBoolean(KEY_AIRPODS_POPUP, enabled)
+            apply()
+        }
+        if (!enabled) {
+            AirPodsPopupController.dismiss()
+        }
+        _state.update { it.copy(airpodsPopupEnabled = enabled) }
     }
 
     fun startFindingEarbuds(side: FindEarbudSide) {
