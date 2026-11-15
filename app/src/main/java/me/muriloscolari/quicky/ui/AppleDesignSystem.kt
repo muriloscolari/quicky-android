@@ -57,6 +57,8 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathOperation
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
@@ -646,9 +648,96 @@ fun AppleCircleButton(
         cornerRadius = 20.dp,
         modifier = modifier
             .size(38.dp)
-            .applePressScale(onClick = onClick),
-        content = content
-    )
+            .applePressScale(onClick = onClick)
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+            content = content
+        )
+    }
+}
+
+/**
+ * Crisp SF-Symbols-style refresh arrow icon drawn on Canvas.
+ */
+@Composable
+fun AppleRefreshIcon(
+    color: Color,
+    modifier: Modifier = Modifier,
+    size: Dp = 18.dp
+) {
+    Canvas(modifier = modifier.size(size.coerceAtLeast(10.dp))) {
+        val w = this.size.width
+        val h = this.size.height
+        if (w <= 0f || h <= 0f) return@Canvas
+        val stroke = (w * 0.12f).coerceAtLeast(1.8f)
+        val inset = stroke * 1.4f
+        val arcSize = androidx.compose.ui.geometry.Size((w - inset * 2f).coerceAtLeast(1f), (h - inset * 2f).coerceAtLeast(1f))
+        drawArc(
+            color = color,
+            startAngle = -55f,
+            sweepAngle = 275f,
+            useCenter = false,
+            topLeft = Offset(inset, inset),
+            size = arcSize,
+            style = Stroke(width = stroke, cap = StrokeCap.Round)
+        )
+        // Arrowhead at top-right (-55 deg)
+        val r = arcSize.width * 0.5f
+        val angleRad = Math.toRadians(-55.0)
+        val tipX = center.x + (r * kotlin.math.cos(angleRad)).toFloat()
+        val tipY = center.y + (r * kotlin.math.sin(angleRad)).toFloat()
+        val headLen = w * 0.22f
+        val arrowPath = Path().apply {
+            moveTo(tipX + headLen * 0.25f, tipY + headLen * 0.1f)
+            lineTo(tipX - headLen * 0.85f, tipY + headLen * 0.25f)
+            lineTo(tipX - headLen * 0.1f, tipY - headLen * 0.85f)
+            close()
+        }
+        drawPath(path = arrowPath, color = color)
+    }
+}
+
+/**
+ * Crisp filled crescent moon icon drawn via geometric circle subtraction.
+ */
+@Composable
+fun AppleMoonIcon(
+    color: Color,
+    modifier: Modifier = Modifier,
+    size: Dp = 16.dp
+) {
+    Canvas(modifier = modifier.size(size.coerceAtLeast(10.dp))) {
+        val w = this.size.width
+        val h = this.size.height
+        if (w <= 0f || h <= 0f) return@Canvas
+        val r = (minOf(w, h) * 0.44f).coerceAtLeast(1f)
+        val mainCircle = Path().apply {
+            addOval(
+                androidx.compose.ui.geometry.Rect(
+                    left = center.x - r,
+                    top = center.y - r,
+                    right = center.x + r,
+                    bottom = center.y + r
+                )
+            )
+        }
+        val cutoutR = r * 0.84f
+        val cutoutCenter = Offset(center.x + r * 0.44f, center.y - r * 0.28f)
+        val cutoutCircle = Path().apply {
+            addOval(
+                androidx.compose.ui.geometry.Rect(
+                    left = cutoutCenter.x - cutoutR,
+                    top = cutoutCenter.y - cutoutR,
+                    right = cutoutCenter.x + cutoutR,
+                    bottom = cutoutCenter.y + cutoutR
+                )
+            )
+        }
+        val crescent = Path.combine(PathOperation.Difference, mainCircle, cutoutCircle)
+        drawPath(path = crescent, color = color)
+    }
 }
 
 /**

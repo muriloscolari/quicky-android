@@ -416,11 +416,16 @@ private fun AppleFloatingTopBar(
                         }
                     }
                     if (showRefresh) {
-                        ApplePillButton(
-                            text = "↻",
-                            prominent = false,
-                            onClick = onRefreshClick
-                        )
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(colors.systemFill)
+                                .applePressScale(onClick = onRefreshClick),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            AppleRefreshIcon(color = colors.accent, size = 16.dp)
+                        }
                     }
                 }
             }
@@ -431,11 +436,7 @@ private fun AppleFloatingTopBar(
                     onClick = onRefreshClick,
                     modifier = Modifier.align(Alignment.CenterEnd)
                 ) {
-                    Text(
-                        text = "↻",
-                        style = AppleTypography.headline,
-                        color = colors.label
-                    )
+                    AppleRefreshIcon(color = colors.label, size = 17.dp)
                 }
             }
         }
@@ -586,7 +587,12 @@ private fun AppleControlsList(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 4.dp, vertical = 4.dp)
+                    .padding(
+                        start = 4.dp,
+                        end = if (state.connected) 52.dp else 4.dp,
+                        top = 4.dp,
+                        bottom = 4.dp
+                    )
                     .graphicsLayer { alpha = headerAlpha }
             ) {
                 Text(
@@ -842,7 +848,7 @@ private fun AppleControlsList(
                     subtitle = "Modo Sono · desativa os comandos de toque do fone",
                     leading = {
                         AppleIconBadge(backgroundColor = Color(0xFF5856D6)) {
-                            Text("☾", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                            AppleMoonIcon(color = Color.White, size = 15.dp)
                         }
                     },
                     trailing = {
@@ -1129,7 +1135,12 @@ private fun AppleSettingsList(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 4.dp, vertical = 4.dp)
+                    .padding(
+                        start = 4.dp,
+                        end = if (state.connected) 52.dp else 4.dp,
+                        top = 4.dp,
+                        bottom = 4.dp
+                    )
                     .graphicsLayer { alpha = headerAlpha }
             ) {
                 Text(
