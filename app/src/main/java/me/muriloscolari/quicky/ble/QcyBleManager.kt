@@ -1,12 +1,14 @@
 package me.muriloscolari.quicky.ble
 
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothA2dp
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothHeadset
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothStatusCodes
@@ -14,8 +16,12 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.companion.CompanionDeviceManager
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioAttributes
+import androidx.core.content.ContextCompat
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.Build
@@ -54,6 +60,7 @@ data class QcyUiState(
     val scanning: Boolean = false,
     val connecting: Boolean = false,
     val connected: Boolean = false,
+    val audioConnected: Boolean = false,
     val connectedAddress: String = "",
     val modelTitle: String = "QCY MeloBuds Pro",
     val vendorId: Int = QcyProtocol.VENDOR_MELOBUDS_PRO,
@@ -116,6 +123,7 @@ object QcyBleManager {
     private var batteryChar: BluetoothGattCharacteristic? = null
     private var versionChar: BluetoothGattCharacteristic? = null
     private var detectedEqTransport: QcyEqTransport? = null
+    private var audioReceiverRegistered = false
     private var isScanning = false
     private val scannedMap = LinkedHashMap<String, ScannedQcyDevice>()
 
@@ -229,7 +237,89 @@ object QcyBleManager {
         if (!notificationsEnabled) {
             QcyControlService.stop(ctx)
         }
+        ensureDynamicAudioReceiverRegistered(ctx)
         ensureObservingCompanionPresence(ctx)
+    }
+
+    private val dynamicAudioReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent?) {
+            val action = intent?.action ?: return
+            val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+            }
+            val deviceName = runCatching { device?.name.orEmpty() }.getOrDefault("")
+            val address = device?.address.orEmpty()
+            val lastSaved = _state.value.lastSavedAddress
+            val matchesQcy = matchesAnySavedOrQcyName(deviceName, address) ||
+                (lastSaved.isNotBlank() && deviceName.isBlank())
+            if (!matchesQcy) return
+
+            when (action) {
+                BluetoothDevice.ACTION_ACL_CONNECTED -> {
+                    onAudioConnected(context, deviceName)
+                    connectOrAutoScan(lastSaved.ifBlank { null })
+                }
+                BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
+                    onAudioDisconnected(context)
+                }
+                BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED,
+                BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED -> {
+                    val profileState = intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1)
+                    if (profileState == BluetoothProfile.STATE_CONNECTED) {
+                        onAudioConnected(context, deviceName)
+                        connectOrAutoScan(lastSaved.ifBlank { null })
+                    } else if (profileState == BluetoothProfile.STATE_DISCONNECTED) {
+                        val btAdapter = adapter()
+                        val a2dpConn = btAdapter?.getProfileConnectionState(BluetoothProfile.A2DP) == BluetoothProfile.STATE_CONNECTED
+                        val hfpConn = btAdapter?.getProfileConnectionState(BluetoothProfile.HEADSET) == BluetoothProfile.STATE_CONNECTED
+                        if (!a2dpConn && !hfpConn) {
+                            onAudioDisconnected(context)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun ensureDynamicAudioReceiverRegistered(ctx: Context) {
+        if (audioReceiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+            addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+            addAction(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
+            addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED)
+        }
+        runCatching {
+            ContextCompat.registerReceiver(
+                ctx.applicationContext,
+                dynamicAudioReceiver,
+                filter,
+                ContextCompat.RECEIVER_EXPORTED
+            )
+            audioReceiverRegistered = true
+        }
+    }
+
+    fun onAudioConnected(context: Context, advertisedName: String? = null) {
+        val ctx = context.applicationContext
+        _state.update { st ->
+            st.copy(
+                audioConnected = true,
+                modelTitle = if (st.modelTitle.isBlank() && !advertisedName.isNullOrBlank()) advertisedName else st.modelTitle
+            )
+        }
+        if (_state.value.airpodsPopupEnabled) {
+            AirPodsPopupController.showInstant(ctx)
+        }
+    }
+
+    fun onAudioDisconnected(context: Context) {
+        _state.update { it.copy(audioConnected = false) }
+        AirPodsPopupController.resetSession()
+        AirPodsPopupController.dismiss()
     }
 
     private fun acquireShortWakeLock(durationMs: Long = 12_000L) {
@@ -704,7 +794,10 @@ object QcyBleManager {
         batteryChar = null
         versionChar = null
         detectedEqTransport = null
-        AirPodsPopupController.dismiss()
+        if (resetPending && !_state.value.audioConnected) {
+            AirPodsPopupController.resetSession()
+            AirPodsPopupController.dismiss()
+        }
         _state.update {
             it.copy(
                 connecting = false,
@@ -864,16 +957,9 @@ object QcyBleManager {
                 }
             }
 
-            // 6. Trigger AirPods-style pop-up strictly on disconnected -> connected transition
+            // 6. Trigger AirPods-style pop-up immediately if audio connect didn't already show it
             if (!wasConnected && _state.value.airpodsPopupEnabled) {
-                val ctx = appContext
-                if (ctx != null) {
-                    mainHandler.postDelayed({
-                        if (_state.value.connected && _state.value.airpodsPopupEnabled) {
-                            AirPodsPopupController.showOnConnect(ctx)
-                        }
-                    }, 650L)
-                }
+                appContext?.let { AirPodsPopupController.showInstant(it) }
             }
 
             // 6. Follow-up verification 1.4s after connect (after A2DP/HFP audio finishes negotiating)
@@ -1420,9 +1506,17 @@ object QcyBleManager {
 
     fun setAncCmdId(cmdId: Int) {
         val packet = QcyProtocol.buildAncCommand(cmdId)
-        val sent = writeCommand(packet)
         val cycleMode = QcyProtocol.modeFromCmdId(cmdId)
         val label = QcyProtocol.formatAncShortLabel(cmdId)
+        val sent = if (_state.value.connected && bluetoothGatt != null && commandChar != null) {
+            writeCommand(packet)
+        } else {
+            pendingAncTargetMode = cycleMode
+            if (!_state.value.connecting && !isScanning) {
+                connectOrAutoScan()
+            }
+            false
+        }
         persistAncSelection(
             cmdId = cmdId,
             cycleMode = cycleMode,

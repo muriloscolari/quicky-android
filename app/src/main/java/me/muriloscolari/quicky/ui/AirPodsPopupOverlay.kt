@@ -83,13 +83,16 @@ import me.muriloscolari.quicky.ble.QcyProtocol
  * Automatically falls back to a transient connect notification when overlay permission is missing.
  */
 object AirPodsPopupController {
-    private const val COOLDOWN_MS = 60_000L
+    private const val BURST_DEDUP_MS = 8_000L
     private const val AUTO_DISMISS_MS = 6_000L
     private const val FALLBACK_CHANNEL_ID = "quicky_connect_popup"
     private const val FALLBACK_NOTIFICATION_ID = 1009
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var lastShownElapsedMs: Long = -COOLDOWN_MS
+    @Volatile
+    private var lastShownElapsedMs: Long = -BURST_DEDUP_MS
+    @Volatile
+    private var sessionShown: Boolean = false
 
     private var windowManager: WindowManager? = null
     private var overlayView: ComposeView? = null
@@ -109,25 +112,35 @@ object AirPodsPopupController {
     }
 
     /**
-     * Triggers the AirPods-style pop-up on a genuine disconnected -> connected transition,
-     * respecting screen unlock state and 60s anti-spam cooldown unless `ignoreCooldown` is true.
+     * Resets the current connection session so the next connect pops up immediately
+     * (even if earbuds were put back in the case for only a couple seconds).
      */
-    fun showOnConnect(context: Context, ignoreCooldown: Boolean = false) {
+    fun resetSession() {
+        sessionShown = false
+        lastShownElapsedMs = -BURST_DEDUP_MS
+    }
+
+    /**
+     * Shows the AirPods-style pop-up immediately upon Bluetooth Audio / BLE connect,
+     * deduplicating the multi-broadcast burst (ACL + HFP + A2DP + GATT) within a single session.
+     */
+    fun showInstant(context: Context, ignoreSessionGuard: Boolean = false) {
         val appCtx = context.applicationContext
+        val state = QcyBleManager.state.value
+        if (!state.airpodsPopupEnabled) return
+        if (!isScreenUnlockedAndInteractive(appCtx)) return
+
         val now = SystemClock.elapsedRealtime()
-        if (!ignoreCooldown && now - lastShownElapsedMs < COOLDOWN_MS) {
-            return
+        if (!ignoreSessionGuard) {
+            if (sessionShown || (now - lastShownElapsedMs < BURST_DEDUP_MS)) {
+                return
+            }
         }
-        if (!isScreenUnlockedAndInteractive(appCtx)) {
-            return
-        }
-        if (!QcyBleManager.state.value.connected) {
-            return
-        }
+        sessionShown = true
         lastShownElapsedMs = now
 
         mainHandler.post {
-            if (!QcyBleManager.state.value.connected) return@post
+            if (!QcyBleManager.state.value.airpodsPopupEnabled) return@post
             if (canDrawOverlays(appCtx)) {
                 showWindowOverlay(appCtx)
             } else {
@@ -171,6 +184,7 @@ object AirPodsPopupController {
 
         val flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
 
         val params = WindowManager.LayoutParams(
@@ -315,6 +329,7 @@ private fun AirPodsPopupOverlayContent(
 
     var visible by remember { mutableStateOf(false) }
     var hasBeenShown by remember { mutableStateOf(false) }
+    var hadActiveLink by remember { mutableStateOf(false) }
     var interactionNonce by remember { mutableIntStateOf(0) }
 
     val triggerDismiss = {
@@ -341,9 +356,11 @@ private fun AirPodsPopupOverlayContent(
         }
     }
 
-    // Dismiss if disconnected while visible
-    LaunchedEffect(state.connected) {
-        if (!state.connected && visible) {
+    // Dismiss early only if both BT Audio and BLE GATT drop after having been active
+    LaunchedEffect(state.connected, state.audioConnected) {
+        if (state.connected || state.audioConnected) {
+            hadActiveLink = true
+        } else if (hadActiveLink && visible) {
             visible = false
         }
     }
@@ -424,10 +441,14 @@ private fun AirPodsPopupOverlayContent(
                                 modifier = Modifier
                                     .size(7.dp)
                                     .clip(CircleShape)
-                                    .background(colors.green)
+                                    .background(if (state.connected) colors.green else colors.accent)
                             )
                             Text(
-                                text = "Conectado · ${QcyProtocol.formatAncShortLabel(state.ancCmdId)}",
+                                text = if (state.connected) {
+                                    "Conectado · ${QcyProtocol.formatAncShortLabel(state.ancCmdId)}"
+                                } else {
+                                    "Áudio conectado · sincronizando..."
+                                },
                                 style = AppleTypography.footnote,
                                 color = colors.secondaryLabel
                             )
