@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <style name="LiquidGlassPopupWindowAnimation">
-        <item name="android:windowEnterAnimation">@anim/liquid_glass_enter</item>
-        <item name="android:windowExitAnimation">@anim/liquid_glass_exit</item>
-    </style>
-</resources>
