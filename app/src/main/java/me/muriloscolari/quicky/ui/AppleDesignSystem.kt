@@ -1,7 +1,10 @@
 package me.muriloscolari.quicky.ui
 
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
+import android.view.HapticFeedbackConstants
+import android.view.View
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
@@ -39,16 +42,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -63,8 +69,12 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -72,12 +82,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.HazeInput
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.glass.GlassStyle
 import dev.chrisbanes.haze.glass.hazeGlass
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 @Immutable
@@ -215,6 +227,182 @@ object AppleMotion {
     val dpSpring = criticalSpring<Dp>(Spring.StiffnessMediumLow)
     val floatSpring = criticalSpring<Float>(Spring.StiffnessMediumLow)
     val colorSpring = criticalSpring<Color>(Spring.StiffnessMedium)
+}
+
+/**
+ * Apple-style tactile haptics backed by Android's hardware HapticFeedbackConstants
+ * (no extra permissions required; respects system touch vibration preferences).
+ */
+@Immutable
+class AppleHaptics(private val view: View) {
+
+    fun tick() {
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            HapticFeedbackConstants.SEGMENT_FREQUENT_TICK
+        } else {
+            HapticFeedbackConstants.CLOCK_TICK
+        }
+        view.performHapticFeedback(code)
+    }
+
+    fun selection() {
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            HapticFeedbackConstants.SEGMENT_TICK
+        } else {
+            HapticFeedbackConstants.CLOCK_TICK
+        }
+        view.performHapticFeedback(code)
+    }
+
+    fun toggle(checked: Boolean) {
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            if (checked) HapticFeedbackConstants.TOGGLE_ON else HapticFeedbackConstants.TOGGLE_OFF
+        } else {
+            HapticFeedbackConstants.CONTEXT_CLICK
+        }
+        view.performHapticFeedback(code)
+    }
+
+    fun impactLight() {
+        view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+    }
+
+    fun scrollBoundary(strong: Boolean) {
+        val code = when {
+            strong && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> HapticFeedbackConstants.CONFIRM
+            strong -> HapticFeedbackConstants.KEYBOARD_TAP
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> HapticFeedbackConstants.SEGMENT_TICK
+            else -> HapticFeedbackConstants.CLOCK_TICK
+        }
+        view.performHapticFeedback(code)
+    }
+
+    fun confirm() {
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            HapticFeedbackConstants.CONFIRM
+        } else {
+            HapticFeedbackConstants.CONTEXT_CLICK
+        }
+        view.performHapticFeedback(code)
+    }
+
+    fun warning() {
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            HapticFeedbackConstants.REJECT
+        } else {
+            HapticFeedbackConstants.LONG_PRESS
+        }
+        view.performHapticFeedback(code)
+    }
+}
+
+val LocalAppleHaptics = compositionLocalOf<AppleHaptics?> { null }
+
+@Composable
+fun rememberAppleHaptics(): AppleHaptics {
+    val provided = LocalAppleHaptics.current
+    if (provided != null) return provided
+    val view = LocalView.current
+    return remember(view) { AppleHaptics(view) }
+}
+
+/**
+ * Triggers Apple-like Taptic inertia feedback when scrolling reaches the top or bottom edge,
+ * or when flinging/pulling against a boundary.
+ */
+fun Modifier.appleScrollEdgeHaptics(
+    listState: LazyListState,
+    haptics: AppleHaptics
+): Modifier = composed {
+    val tracker = remember(listState, haptics) {
+        object {
+            var lastHapticMs = 0L
+            var edgeFiredInGesture = false
+            var crossedThresholdInDrag = false
+
+            fun fire(strong: Boolean) {
+                val now = SystemClock.uptimeMillis()
+                val minGap = if (strong) 180L else 260L
+                if (now - lastHapticMs >= minGap) {
+                    lastHapticMs = now
+                    haptics.scrollBoundary(strong = strong)
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(listState, haptics) {
+        var initialized = false
+        var prevCanBack = false
+        var prevCanForward = false
+        snapshotFlow {
+            Triple(
+                listState.isScrollInProgress,
+                listState.canScrollBackward,
+                listState.canScrollForward
+            )
+        }.collect { (scrolling, canBack, canForward) ->
+            if (!initialized) {
+                initialized = true
+                prevCanBack = canBack
+                prevCanForward = canForward
+                return@collect
+            }
+            if (scrolling) {
+                if ((prevCanForward && !canForward) || (prevCanBack && !canBack)) {
+                    tracker.fire(strong = true)
+                    tracker.edgeFiredInGesture = true
+                }
+            } else {
+                tracker.edgeFiredInGesture = false
+                tracker.crossedThresholdInDrag = false
+            }
+            prevCanBack = canBack
+            prevCanForward = canForward
+        }
+    }
+
+    val connection = remember(listState, haptics, tracker) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                val dy = available.y
+                if (abs(dy) > 2f && source == NestedScrollSource.UserInput) {
+                    val pullingPastTop = !listState.canScrollBackward && dy > 4f
+                    val pullingPastBottom = !listState.canScrollForward && dy < -4f
+                    if (pullingPastTop || pullingPastBottom) {
+                        if (!tracker.edgeFiredInGesture) {
+                            tracker.fire(strong = false)
+                            tracker.edgeFiredInGesture = true
+                        }
+                    } else if ((listState.canScrollBackward && dy > 4f) || (listState.canScrollForward && dy < -4f)) {
+                        tracker.edgeFiredInGesture = false
+                    }
+                }
+                return Offset.Zero
+            }
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                val vy = available.y
+                if ((vy > 520f && !listState.canScrollBackward) ||
+                    (vy < -520f && !listState.canScrollForward)
+                ) {
+                    tracker.fire(strong = true)
+                    tracker.edgeFiredInGesture = true
+                }
+                return Velocity.Zero
+            }
+
+            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                if (abs(available.y) > 320f && (!listState.canScrollBackward || !listState.canScrollForward)) {
+                    tracker.fire(strong = true)
+                }
+                tracker.edgeFiredInGesture = false
+                return Velocity.Zero
+            }
+        }
+    }
+
+    this.nestedScroll(connection)
 }
 
 @Composable
@@ -455,6 +643,7 @@ fun AppleToggle(
     modifier: Modifier = Modifier
 ) {
     val colors = LocalAppleColors.current
+    val haptics = rememberAppleHaptics()
     val trackColor by animateColorAsState(
         targetValue = if (checked) colors.green else colors.systemFill,
         animationSpec = AppleMotion.colorSpring,
@@ -475,7 +664,11 @@ fun AppleToggle(
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
-            ) { onCheckedChange(!checked) }
+            ) {
+                val next = !checked
+                haptics.toggle(next)
+                onCheckedChange(next)
+            }
             .padding(2.dp)
     ) {
         Box(
@@ -504,6 +697,7 @@ fun <T> PortalSegmentedControl(
 ) {
     if (items.isEmpty()) return
     val colors = LocalAppleColors.current
+    val haptics = rememberAppleHaptics()
     val selectedIndex = items.indexOf(selectedItem).coerceAtLeast(0)
     val trackShape = if (isCapsule) CircleShape else RoundedCornerShape(10.dp)
     val thumbShape = if (isCapsule) CircleShape else RoundedCornerShape(8.dp)
@@ -551,7 +745,12 @@ fun <T> PortalSegmentedControl(
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null
-                        ) { onSelect(item) },
+                        ) {
+                            if (item != selectedItem) {
+                                haptics.selection()
+                            }
+                            onSelect(item)
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     if (showDivider) {
@@ -616,13 +815,17 @@ fun ApplePillButton(
     enabled: Boolean = true
 ) {
     val colors = LocalAppleColors.current
+    val haptics = rememberAppleHaptics()
     val bg = if (prominent) colors.accent else colors.systemFill
     val fg = if (prominent) Color.White else colors.accent
     Box(
         modifier = modifier
             .clip(CircleShape)
             .background(if (enabled) bg else bg.copy(alpha = 0.5f))
-            .applePressScale(enabled = enabled, onClick = onClick)
+            .applePressScale(enabled = enabled) {
+                haptics.impactLight()
+                onClick()
+            }
             .padding(horizontal = 16.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -643,12 +846,16 @@ fun AppleCircleButton(
     modifier: Modifier = Modifier,
     content: @Composable BoxScope.() -> Unit
 ) {
+    val haptics = rememberAppleHaptics()
     GlassSurface(
         hazeState = hazeState,
         cornerRadius = 20.dp,
         modifier = modifier
             .size(38.dp)
-            .applePressScale(onClick = onClick)
+            .applePressScale {
+                haptics.impactLight()
+                onClick()
+            }
     ) {
         Box(
             modifier = Modifier.fillMaxSize(),
@@ -849,6 +1056,7 @@ fun AppleSheet(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val colors = LocalAppleColors.current
+    val haptics = rememberAppleHaptics()
     var dragOffsetPx by remember { mutableFloatStateOf(0f) }
 
     Box(
@@ -880,6 +1088,7 @@ fun AppleSheet(
                     detectVerticalDragGestures(
                         onDragEnd = {
                             if (dragOffsetPx > 140f) {
+                                haptics.impactLight()
                                 onDismiss()
                             }
                             dragOffsetPx = 0f

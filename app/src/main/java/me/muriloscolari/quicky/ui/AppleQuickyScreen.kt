@@ -49,6 +49,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -124,6 +125,7 @@ fun AppleQuickyScreen(
     onDownloadAndInstallUpdate: (ReleaseInfo) -> Unit
 ) {
     val appleColors = rememberAppleColors()
+    val appleHaptics = rememberAppleHaptics()
     val reduceMotion = rememberReduceMotion()
     val hazeState = rememberHazeState()
 
@@ -165,7 +167,10 @@ fun AppleQuickyScreen(
         }
     }
 
-    CompositionLocalProvider(LocalAppleColors provides appleColors) {
+    CompositionLocalProvider(
+        LocalAppleColors provides appleColors,
+        LocalAppleHaptics provides appleHaptics
+    ) {
         // Black underlay for depth pullback when an AppleSheet is open
         Box(
             modifier = Modifier
@@ -211,8 +216,14 @@ fun AppleQuickyScreen(
                             onToggleLdac = onToggleLdac,
                             onToggleDualConnect = onToggleDualConnect,
                             onSetKeyMapping = onSetKeyMapping,
-                            onEditTapKey = { editingKey = it },
-                            onRequestFindEarbuds = { side -> pendingFindSide = side },
+                            onEditTapKey = {
+                                appleHaptics.impactLight()
+                                editingKey = it
+                            },
+                            onRequestFindEarbuds = { side ->
+                                appleHaptics.warning()
+                                pendingFindSide = side
+                            },
                             onStartFindEarbuds = onStartFindEarbuds,
                             onStopFindEarbuds = onStopFindEarbuds
                         )
@@ -297,6 +308,7 @@ fun AppleQuickyScreen(
                                             .fillMaxWidth()
                                             .clip(RoundedCornerShape(14.dp))
                                             .clickable {
+                                                appleHaptics.selection()
                                                 onSetKeyMapping(targetKey.keyId, action.funcId)
                                                 editingKey = null
                                             }
@@ -339,10 +351,14 @@ fun AppleQuickyScreen(
                         confirmText = "Emitir som",
                         dismissText = "Cancelar",
                         onConfirm = {
+                            appleHaptics.confirm()
                             pendingFindSide = null
                             onStartFindEarbuds(side)
                         },
-                        onDismiss = { pendingFindSide = null }
+                        onDismiss = {
+                            appleHaptics.impactLight()
+                            pendingFindSide = null
+                        }
                     )
                 }
             }
@@ -416,12 +432,16 @@ private fun AppleFloatingTopBar(
                         }
                     }
                     if (showRefresh) {
+                        val haptics = rememberAppleHaptics()
                         Box(
                             modifier = Modifier
                                 .size(34.dp)
                                 .clip(CircleShape)
                                 .background(colors.systemFill)
-                                .applePressScale(onClick = onRefreshClick),
+                                .applePressScale {
+                                    haptics.impactLight()
+                                    onRefreshClick()
+                                },
                             contentAlignment = Alignment.Center
                         ) {
                             AppleRefreshIcon(color = colors.accent, size = 16.dp)
@@ -452,6 +472,7 @@ private fun AppleFloatingTabBar(
     modifier: Modifier = Modifier
 ) {
     val colors = LocalAppleColors.current
+    val haptics = rememberAppleHaptics()
     val tabs = AppleTab.entries
     val selectedIndex = tabs.indexOf(activeTab).coerceAtLeast(0)
 
@@ -505,7 +526,12 @@ private fun AppleFloatingTabBar(
                                 .clickable(
                                     interactionSource = remember { MutableInteractionSource() },
                                     indication = null
-                                ) { onSelectTab(tab) },
+                                ) {
+                                    if (tab != activeTab) {
+                                        haptics.selection()
+                                    }
+                                    onSelectTab(tab)
+                                },
                             contentAlignment = Alignment.Center
                         ) {
                             Row(
@@ -561,6 +587,7 @@ private fun AppleControlsList(
     onStopFindEarbuds: () -> Unit
 ) {
     val colors = LocalAppleColors.current
+    val haptics = rememberAppleHaptics()
     val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val navBarBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
@@ -572,7 +599,9 @@ private fun AppleControlsList(
 
     LazyColumn(
         state = listState,
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .appleScrollEdgeHaptics(listState, haptics),
         contentPadding = PaddingValues(
             start = 16.dp,
             end = 16.dp,
@@ -744,7 +773,10 @@ private fun AppleControlsList(
                         color = colors.accent,
                         modifier = Modifier
                             .clip(CircleShape)
-                            .clickable(onClick = onCycleAncClick)
+                            .clickable {
+                                haptics.selection()
+                                onCycleAncClick()
+                            }
                             .padding(horizontal = 10.dp, vertical = 4.dp)
                     )
                 }
@@ -787,6 +819,9 @@ private fun AppleControlsList(
                                         shape = CircleShape
                                     )
                                     .clickable {
+                                        if (!active) {
+                                            haptics.selection()
+                                        }
                                         val targetCmd = if (scene.levelCount > 1 && currentAncLevel != null) {
                                             scene.cmdIdForLevel(currentAncLevel)
                                         } else {
@@ -1083,7 +1118,10 @@ private fun AppleControlsList(
                         color = colors.red,
                         modifier = Modifier
                             .clip(CircleShape)
-                            .clickable(onClick = onDisconnectClick)
+                            .clickable {
+                                haptics.warning()
+                                onDisconnectClick()
+                            }
                             .padding(horizontal = 20.dp, vertical = 10.dp)
                     )
                 }
@@ -1116,12 +1154,15 @@ private fun AppleSettingsList(
     onDownloadAndInstallUpdate: (ReleaseInfo) -> Unit
 ) {
     val colors = LocalAppleColors.current
+    val haptics = rememberAppleHaptics()
     val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val navBarBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
     LazyColumn(
         state = listState,
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .appleScrollEdgeHaptics(listState, haptics),
         contentPadding = PaddingValues(
             start = 16.dp,
             end = 16.dp,
@@ -1267,7 +1308,12 @@ private fun AppleSettingsList(
                                 )
                             }
                         },
-                        onClick = { onSelectUiStyle(style) }
+                        onClick = {
+                            if (!selected) {
+                                haptics.selection()
+                            }
+                            onSelectUiStyle(style)
+                        }
                     )
                 }
             }
@@ -1338,7 +1384,10 @@ private fun AppleSettingsList(
                             .background(colors.systemFill)
                             .applePressScale(
                                 enabled = !checkingUpdate && downloadingPercent == null,
-                                onClick = onCheckUpdateNow
+                                onClick = {
+                                    haptics.impactLight()
+                                    onCheckUpdateNow()
+                                }
                             )
                             .padding(vertical = 11.dp),
                         contentAlignment = Alignment.Center
@@ -1363,7 +1412,10 @@ private fun AppleSettingsList(
                                 .background(colors.accent)
                                 .applePressScale(
                                     enabled = downloadingPercent == null,
-                                    onClick = { onDownloadAndInstallUpdate(availableRelease) }
+                                    onClick = {
+                                        haptics.impactLight()
+                                        onDownloadAndInstallUpdate(availableRelease)
+                                    }
                                 )
                                 .padding(vertical = 11.dp),
                             contentAlignment = Alignment.Center
@@ -1445,9 +1497,17 @@ private fun AppleNoiseSlider(
     onCommitLevel: (Int) -> Unit
 ) {
     val colors = LocalAppleColors.current
+    val haptics = rememberAppleHaptics()
     var draggingLevel by remember(ancCmdId) { mutableStateOf<Float?>(null) }
     val displayLevel = (draggingLevel?.roundToInt() ?: currentLevel).coerceIn(1, levelCount)
     val sliderValue = draggingLevel ?: currentLevel.toFloat()
+
+    // Tactile notch tick whenever the user drags across a new intensity step
+    LaunchedEffect(displayLevel, draggingLevel != null) {
+        if (draggingLevel != null) {
+            haptics.tick()
+        }
+    }
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -1476,6 +1536,7 @@ private fun AppleNoiseSlider(
                 val targetLevel = (draggingLevel?.roundToInt() ?: currentLevel).coerceIn(1, levelCount)
                 draggingLevel = null
                 if (targetLevel != currentLevel) {
+                    haptics.impactLight()
                     onCommitLevel(targetLevel)
                 }
             },
