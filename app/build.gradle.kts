@@ -11,8 +11,8 @@ android {
         applicationId = "me.muriloscolari.quicky"
         minSdk = 26
         targetSdk = 35
-        versionCode = 15
-        versionName = "0.6.1"
+        versionCode = 16
+        versionName = "0.6.2"
 
         resourceConfigurations += listOf("pt", "en")
     }

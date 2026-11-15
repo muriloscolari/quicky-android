@@ -88,6 +88,7 @@ data class QcyUiState(
     val lastSavedAddress: String = "",
     val lastControlMac: String = "",
     val lastOtherMac: String = "",
+    val lastClassicMac: String = "",
     val devices: List<ScannedQcyDevice> = emptyList(),
     val statusMessage: String = "Pronto para conectar"
 )
@@ -102,6 +103,7 @@ object QcyBleManager {
     private const val KEY_LAST_ADDRESS = "last_ble_address"
     private const val KEY_LAST_CONTROL_MAC = "last_control_mac"
     private const val KEY_LAST_OTHER_MAC = "last_other_mac"
+    private const val KEY_LAST_CLASSIC_MAC = "last_classic_mac"
     private const val KEY_NOTIFICATIONS_ENABLED = "notifications_enabled"
     private const val KEY_ANC_CYCLE_MODE = "last_anc_cycle_mode"
     private const val KEY_PREFERRED_ANC_CMD = "preferred_anc_cmd_id"
@@ -167,6 +169,8 @@ object QcyBleManager {
     private val scanTimeoutRunnable = Runnable { onScanTimeoutReached() }
     private val directFallbackRunnable = Runnable { onDirectFallbackReached() }
     private val connectWatchdogRunnable = Runnable { onConnectWatchdogTimeout() }
+    private val postBtOnCheckRunnable = Runnable { appContext?.let { warmUpIfAudioConnected(it) } }
+    private val postBtOnDelayedRunnable = Runnable { appContext?.let { warmUpIfAudioConnected(it) } }
 
     @Volatile
     private var findAudioThread: Thread? = null
@@ -186,6 +190,7 @@ object QcyBleManager {
         val lastAddr = prefs.getString(KEY_LAST_ADDRESS, "") ?: ""
         val lastControl = prefs.getString(KEY_LAST_CONTROL_MAC, "") ?: ""
         val lastOther = prefs.getString(KEY_LAST_OTHER_MAC, "") ?: ""
+        val lastClassic = prefs.getString(KEY_LAST_CLASSIC_MAC, "") ?: ""
         val notificationsEnabled = prefs.getBoolean(KEY_NOTIFICATIONS_ENABLED, false)
         val savedAncName = prefs.getString(KEY_ANC_CYCLE_MODE, AncCycleMode.OFF.name) ?: AncCycleMode.OFF.name
         val savedPrefAnc = prefs.getInt(KEY_PREFERRED_ANC_CMD, AncCycleMode.ANC.meloBudsCmdId)
@@ -222,6 +227,7 @@ object QcyBleManager {
                 lastSavedAddress = lastAddr,
                 lastControlMac = lastControl,
                 lastOtherMac = lastOther,
+                lastClassicMac = lastClassic,
                 notificationsEnabled = notificationsEnabled,
                 ancCycleMode = savedAnc,
                 ancCmdId = initialCmdId,
@@ -243,41 +249,27 @@ object QcyBleManager {
 
     private val dynamicAudioReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent?) {
-            val action = intent?.action ?: return
-            val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-            }
-            val deviceName = runCatching { device?.name.orEmpty() }.getOrDefault("")
-            val address = device?.address.orEmpty()
-            val lastSaved = _state.value.lastSavedAddress
-            val matchesQcy = matchesAnySavedOrQcyName(deviceName, address) ||
-                (lastSaved.isNotBlank() && deviceName.isBlank())
-            if (!matchesQcy) return
-
-            when (action) {
-                BluetoothDevice.ACTION_ACL_CONNECTED -> {
-                    onAudioConnected(context, deviceName)
-                    connectOrAutoScan(lastSaved.ifBlank { null })
+            val act = intent?.action ?: return
+            val ctx = context.applicationContext
+            when (act) {
+                Intent.ACTION_USER_PRESENT -> {
+                    AirPodsPopupController.onUserUnlocked(ctx)
                 }
-                BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
-                    onAudioDisconnected(context)
+                BluetoothAdapter.ACTION_STATE_CHANGED -> {
+                    val btState = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                    if (btState == BluetoothAdapter.STATE_ON) {
+                        ensureObservingCompanionPresence(ctx)
+                        warmUpIfAudioConnected(ctx)
+                        schedulePostBluetoothOnAudioCheck(ctx)
+                    } else if (btState == BluetoothAdapter.STATE_OFF || btState == BluetoothAdapter.STATE_TURNING_OFF) {
+                        cancelPostBluetoothOnAudioCheck()
+                        onAudioDisconnected(ctx)
+                        disconnect()
+                    }
                 }
-                BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED,
-                BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED -> {
-                    val profileState = intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1)
-                    if (profileState == BluetoothProfile.STATE_CONNECTED) {
-                        onAudioConnected(context, deviceName)
-                        connectOrAutoScan(lastSaved.ifBlank { null })
-                    } else if (profileState == BluetoothProfile.STATE_DISCONNECTED) {
-                        val btAdapter = adapter()
-                        val a2dpConn = btAdapter?.getProfileConnectionState(BluetoothProfile.A2DP) == BluetoothProfile.STATE_CONNECTED
-                        val hfpConn = btAdapter?.getProfileConnectionState(BluetoothProfile.HEADSET) == BluetoothProfile.STATE_CONNECTED
-                        if (!a2dpConn && !hfpConn) {
-                            onAudioDisconnected(context)
-                        }
+                else -> {
+                    if (handleAudioBroadcast(ctx, intent)) {
+                        connectOrAutoScan(_state.value.lastSavedAddress.ifBlank { null })
                     }
                 }
             }
@@ -291,6 +283,9 @@ object QcyBleManager {
             addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
             addAction(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
             addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED)
+            addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED)
+            addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+            addAction(Intent.ACTION_USER_PRESENT)
         }
         runCatching {
             ContextCompat.registerReceiver(
@@ -303,11 +298,118 @@ object QcyBleManager {
         }
     }
 
-    fun onAudioConnected(context: Context, advertisedName: String? = null) {
+    fun isBluetoothEnabled(): Boolean = adapter()?.isEnabled == true
+
+    fun schedulePostBluetoothOnAudioCheck(context: Context) {
+        appContext = context.applicationContext
+        cancelPostBluetoothOnAudioCheck()
+        if (!isBluetoothEnabled()) return
+        mainHandler.postDelayed(postBtOnCheckRunnable, 1_800L)
+        mainHandler.postDelayed(postBtOnDelayedRunnable, 3_800L)
+    }
+
+    fun cancelPostBluetoothOnAudioCheck() {
+        mainHandler.removeCallbacks(postBtOnCheckRunnable)
+        mainHandler.removeCallbacks(postBtOnDelayedRunnable)
+    }
+
+    private fun isAnyAudioProfileConnected(): Boolean {
+        val btAdapter = adapter() ?: return false
+        if (!btAdapter.isEnabled) return false
+        val a2dpConn = runCatching {
+            btAdapter.getProfileConnectionState(BluetoothProfile.A2DP) == BluetoothProfile.STATE_CONNECTED
+        }.getOrDefault(false)
+        val hfpConn = runCatching {
+            btAdapter.getProfileConnectionState(BluetoothProfile.HEADSET) == BluetoothProfile.STATE_CONNECTED
+        }.getOrDefault(false)
+        return a2dpConn || hfpConn
+    }
+
+    /**
+     * Handles ACL, A2DP, Headset, and Adapter connection broadcasts uniformly.
+     * Returns true when a matching QCY audio link just connected.
+     */
+    fun handleAudioBroadcast(context: Context, intent: Intent): Boolean {
         val ctx = context.applicationContext
+        init(ctx)
+        val action = intent.action ?: return false
+        val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+        }
+
+        val deviceName = runCatching { device?.name.orEmpty() }.getOrDefault("")
+        val deviceAlias = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching { device?.alias.orEmpty() }.getOrDefault("")
+        } else {
+            ""
+        }
+        val address = device?.address.orEmpty()
+        val s = _state.value
+        val hasKnownDevice = s.lastSavedAddress.isNotBlank() ||
+            s.lastClassicMac.isNotBlank() ||
+            s.lastControlMac.isNotBlank()
+        val companionMacs = getCompanionAssociations(ctx)
+        val matchesQcy = matchesAnySavedOrQcyName(deviceName, address, deviceAlias, companionMacs) ||
+            (hasKnownDevice && deviceName.isBlank() && deviceAlias.isBlank())
+
+        if (!matchesQcy) return false
+
+        val isDisconnectEvent = when (action) {
+            BluetoothDevice.ACTION_ACL_DISCONNECTED -> true
+            BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED -> {
+                intent.getIntExtra(BluetoothAdapter.EXTRA_CONNECTION_STATE, -1) == BluetoothAdapter.STATE_DISCONNECTED
+            }
+            BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED,
+            BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED -> {
+                intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1) == BluetoothProfile.STATE_DISCONNECTED
+            }
+            else -> false
+        }
+        if (isDisconnectEvent) {
+            if (action == BluetoothDevice.ACTION_ACL_DISCONNECTED || !isAnyAudioProfileConnected()) {
+                onAudioDisconnected(ctx)
+            }
+            return false
+        }
+
+        val isConnectEvent = when (action) {
+            BluetoothDevice.ACTION_ACL_CONNECTED -> true
+            BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED -> {
+                intent.getIntExtra(BluetoothAdapter.EXTRA_CONNECTION_STATE, -1) == BluetoothAdapter.STATE_CONNECTED
+            }
+            BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED,
+            BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED -> {
+                intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1) == BluetoothProfile.STATE_CONNECTED
+            }
+            else -> false
+        }
+        if (!isConnectEvent) return false
+
+        onAudioConnected(ctx, deviceName.ifBlank { deviceAlias }, address)
+        return true
+    }
+
+    fun onAudioConnected(
+        context: Context,
+        advertisedName: String? = null,
+        deviceAddress: String? = null
+    ) {
+        val ctx = context.applicationContext
+        if (!isBluetoothEnabled()) return
+        cancelPostBluetoothOnAudioCheck()
+        val cleanClassicMac = deviceAddress?.trim().orEmpty()
+        if (cleanClassicMac.isNotEmpty() && !cleanClassicMac.equals(_state.value.lastClassicMac, ignoreCase = true)) {
+            ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()
+                ?.putString(KEY_LAST_CLASSIC_MAC, cleanClassicMac)
+                ?.apply()
+        }
         _state.update { st ->
             st.copy(
                 audioConnected = true,
+                lastClassicMac = cleanClassicMac.ifBlank { st.lastClassicMac },
                 modelTitle = if (st.modelTitle.isBlank() && !advertisedName.isNullOrBlank()) advertisedName else st.modelTitle
             )
         }
@@ -317,9 +419,9 @@ object QcyBleManager {
     }
 
     fun onAudioDisconnected(context: Context) {
+        cancelPostBluetoothOnAudioCheck()
         _state.update { it.copy(audioConnected = false) }
-        AirPodsPopupController.resetSession()
-        AirPodsPopupController.dismiss()
+        AirPodsPopupController.onDisconnected()
     }
 
     private fun acquireShortWakeLock(durationMs: Long = 12_000L) {
@@ -795,8 +897,7 @@ object QcyBleManager {
         versionChar = null
         detectedEqTransport = null
         if (resetPending && !_state.value.audioConnected) {
-            AirPodsPopupController.resetSession()
-            AirPodsPopupController.dismiss()
+            AirPodsPopupController.onDisconnected()
         }
         _state.update {
             it.copy(
@@ -818,7 +919,7 @@ object QcyBleManager {
                 gatt.discoverServices()
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 val addr = gatt.device?.address
-                val shouldRetry = status == 133 && !gattRetryAttempted && !addr.isNullOrBlank()
+                val shouldRetry = status == 133 && !gattRetryAttempted && !addr.isNullOrBlank() && isBluetoothEnabled()
                 if (shouldRetry) {
                     gattRetryAttempted = true
                     runCatching { gatt.close() }
@@ -958,7 +1059,7 @@ object QcyBleManager {
             }
 
             // 6. Trigger AirPods-style pop-up immediately if audio connect didn't already show it
-            if (!wasConnected && _state.value.airpodsPopupEnabled) {
+            if (!wasConnected && _state.value.airpodsPopupEnabled && isBluetoothEnabled()) {
                 appContext?.let { AirPodsPopupController.showInstant(it) }
             }
 
@@ -1583,42 +1684,74 @@ object QcyBleManager {
     fun hasPendingAncCommand(): Boolean = pendingAncTargetMode != null
 
     fun warmUpIfAudioConnected(context: Context) {
-        init(context)
-        if (_state.value.connected) {
-            if (_state.value.autoSleepOnConnect && !_state.value.sleepModeEnabled) {
+        val ctx = context.applicationContext
+        init(ctx)
+        val btAdapter = adapter() ?: return
+        if (!btAdapter.isEnabled) return
+
+        val companionMacs = getCompanionAssociations(ctx)
+        val profilesToCheck = listOf(BluetoothProfile.A2DP, BluetoothProfile.HEADSET)
+            .filter { btAdapter.getProfileConnectionState(it) == BluetoothProfile.STATE_CONNECTED }
+
+        if (profilesToCheck.isEmpty()) {
+            if (_state.value.connected && _state.value.autoSleepOnConnect && !_state.value.sleepModeEnabled) {
                 ensureAutoSleepIfNeeded()
             }
             return
         }
-        if (_state.value.connecting || isScanning) return
-        val btAdapter = adapter() ?: return
-        if (!btAdapter.isEnabled) return
-        if (btAdapter.getProfileConnectionState(BluetoothProfile.A2DP) != BluetoothProfile.STATE_CONNECTED) return
 
-        btAdapter.getProfileProxy(context.applicationContext, object : BluetoothProfile.ServiceListener {
-            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-                val devices = runCatching { proxy.connectedDevices }.getOrDefault(emptyList())
-                val qcyConnected = devices.any { dev -> matchesAnySavedOrQcyName(dev.name, dev.address) }
-                runCatching { btAdapter.closeProfileProxy(profile, proxy) }
-                if (qcyConnected && !_state.value.connected && !_state.value.connecting) {
-                    connectOrAutoScan()
+        profilesToCheck.forEach { targetProfile ->
+            btAdapter.getProfileProxy(ctx, object : BluetoothProfile.ServiceListener {
+                override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+                    val devices = runCatching { proxy.connectedDevices }.getOrDefault(emptyList())
+                    val matchedDevice = devices.firstOrNull { dev ->
+                        val name = runCatching { dev.name.orEmpty() }.getOrDefault("")
+                        val alias = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            runCatching { dev.alias.orEmpty() }.getOrDefault("")
+                        } else ""
+                        matchesAnySavedOrQcyName(name, dev.address, alias, companionMacs)
+                    }
+                    runCatching { btAdapter.closeProfileProxy(profile, proxy) }
+                    if (matchedDevice != null && isBluetoothEnabled()) {
+                        val name = runCatching { matchedDevice.name.orEmpty() }.getOrDefault("")
+                        if (!_state.value.audioConnected) {
+                            onAudioConnected(ctx, name, matchedDevice.address)
+                        }
+                        if (_state.value.connected) {
+                            if (_state.value.autoSleepOnConnect && !_state.value.sleepModeEnabled) {
+                                ensureAutoSleepIfNeeded()
+                            }
+                        } else if (!_state.value.connecting && !isScanning) {
+                            connectOrAutoScan()
+                        }
+                    }
                 }
-            }
 
-            override fun onServiceDisconnected(profile: Int) {}
-        }, BluetoothProfile.A2DP)
+                override fun onServiceDisconnected(profile: Int) {}
+            }, targetProfile)
+        }
     }
 
-    fun matchesAnySavedOrQcyName(name: String?, address: String?): Boolean {
+    fun matchesAnySavedOrQcyName(
+        name: String?,
+        address: String?,
+        alias: String? = null,
+        companionMacs: List<String> = emptyList()
+    ): Boolean {
         val devName = name.orEmpty()
+        val devAlias = alias.orEmpty()
         val addr = address.orEmpty()
         val s = _state.value
         val byName = devName.contains("QCY", ignoreCase = true) ||
-            devName.contains("MeloBuds", ignoreCase = true)
+            devName.contains("MeloBuds", ignoreCase = true) ||
+            devAlias.contains("QCY", ignoreCase = true) ||
+            devAlias.contains("MeloBuds", ignoreCase = true)
         val byAddr = addr.isNotBlank() && (
             addr.equals(s.lastSavedAddress, ignoreCase = true) ||
+                addr.equals(s.lastClassicMac, ignoreCase = true) ||
                 addr.equals(s.lastControlMac, ignoreCase = true) ||
-                addr.equals(s.lastOtherMac, ignoreCase = true)
+                addr.equals(s.lastOtherMac, ignoreCase = true) ||
+                companionMacs.any { it.equals(addr, ignoreCase = true) }
             )
         return byName || byAddr
     }

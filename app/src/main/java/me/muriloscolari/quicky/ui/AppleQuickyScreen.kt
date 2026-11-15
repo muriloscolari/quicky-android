@@ -66,6 +66,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -1313,6 +1314,7 @@ private fun AppleSettingsList(
                     }
                 )
                 if (state.airpodsPopupEnabled) {
+                    val context = LocalContext.current
                     PortalDivider(startIndent = 42.dp)
                     PortalListRow(
                         title = "Sobrepor outros apps",
@@ -1326,6 +1328,18 @@ private fun AppleSettingsList(
                                 text = if (overlayPermissionGranted) "Ativo" else "Permitir",
                                 prominent = !overlayPermissionGranted,
                                 onClick = onRequestOverlayPermission
+                            )
+                        }
+                    )
+                    PortalDivider(startIndent = 42.dp)
+                    PortalListRow(
+                        title = "Testar pop-up agora",
+                        subtitle = "Pré-visualizar o cartão flutuante na tela",
+                        trailing = {
+                            ApplePillButton(
+                                text = "Testar",
+                                prominent = false,
+                                onClick = { AirPodsPopupController.showPreview(context) }
                             )
                         }
                     )

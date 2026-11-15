@@ -11,19 +11,19 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
+import android.view.Display
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.WindowManager
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -32,7 +32,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -47,14 +46,15 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -72,11 +72,13 @@ import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import me.muriloscolari.quicky.MainActivity
 import me.muriloscolari.quicky.R
 import me.muriloscolari.quicky.ble.AncCycleMode
 import me.muriloscolari.quicky.ble.QcyBleManager
 import me.muriloscolari.quicky.ble.QcyProtocol
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Floating AirPods-style pop-up sheet rendered via WindowManager (TYPE_APPLICATION_OVERLAY).
@@ -89,10 +91,15 @@ object AirPodsPopupController {
     private const val FALLBACK_NOTIFICATION_ID = 1009
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val popupGeneration = AtomicLong(0L)
     @Volatile
     private var lastShownElapsedMs: Long = -BURST_DEDUP_MS
     @Volatile
     private var sessionShown: Boolean = false
+    @Volatile
+    private var deferredUntilUnlock: Boolean = false
+    @Volatile
+    private var pendingShowRunnable: Runnable? = null
 
     private var windowManager: WindowManager? = null
     private var overlayView: ComposeView? = null
@@ -116,40 +123,112 @@ object AirPodsPopupController {
      * (even if earbuds were put back in the case for only a couple seconds).
      */
     fun resetSession() {
+        popupGeneration.incrementAndGet()
+        pendingShowRunnable?.let { mainHandler.removeCallbacks(it) }
+        pendingShowRunnable = null
         sessionShown = false
+        deferredUntilUnlock = false
         lastShownElapsedMs = -BURST_DEDUP_MS
+    }
+
+    /**
+     * Called on audio/Bluetooth disconnect or BT radio off: invalidates any queued popup,
+     * resets session state, and removes any overlay immediately without exit flashes.
+     */
+    fun onDisconnected() {
+        resetSession()
+        val removeTask = { removeOverlayImmediately() }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            removeTask()
+        } else {
+            mainHandler.post(removeTask)
+        }
+    }
+
+    /**
+     * If earbuds connected while the screen was locked, show the pop-up once the user unlocks.
+     */
+    fun onUserUnlocked(context: Context) {
+        if (!deferredUntilUnlock) return
+        val st = QcyBleManager.state.value
+        if (!st.airpodsPopupEnabled || !st.audioConnected || !QcyBleManager.isBluetoothEnabled()) {
+            deferredUntilUnlock = false
+            return
+        }
+        deferredUntilUnlock = false
+        showInstant(context)
+    }
+
+    /**
+     * Manual preview triggered from Ajustes so the user can test overlay rendering anytime.
+     */
+    fun showPreview(context: Context) {
+        showInstant(context, ignoreSessionGuard = true, isPreview = true)
     }
 
     /**
      * Shows the AirPods-style pop-up immediately upon Bluetooth Audio / BLE connect,
      * deduplicating the multi-broadcast burst (ACL + HFP + A2DP + GATT) within a single session.
      */
-    fun showInstant(context: Context, ignoreSessionGuard: Boolean = false) {
+    fun showInstant(
+        context: Context,
+        ignoreSessionGuard: Boolean = false,
+        isPreview: Boolean = false
+    ) {
         val appCtx = context.applicationContext
         val state = QcyBleManager.state.value
-        if (!state.airpodsPopupEnabled) return
-        if (!isScreenUnlockedAndInteractive(appCtx)) return
+        if (!isPreview) {
+            if (!state.airpodsPopupEnabled) return
+            if (!QcyBleManager.isBluetoothEnabled()) return
+            if (!isScreenUnlockedAndInteractive(appCtx)) {
+                deferredUntilUnlock = true
+                return
+            }
+        }
 
         val now = SystemClock.elapsedRealtime()
-        if (!ignoreSessionGuard) {
+        if (!ignoreSessionGuard && !isPreview) {
             if (sessionShown || (now - lastShownElapsedMs < BURST_DEDUP_MS)) {
                 return
             }
         }
-        sessionShown = true
-        lastShownElapsedMs = now
+        if (!isPreview) {
+            sessionShown = true
+            deferredUntilUnlock = false
+            lastShownElapsedMs = now
+        }
 
-        mainHandler.post {
-            if (!QcyBleManager.state.value.airpodsPopupEnabled) return@post
+        pendingShowRunnable?.let { mainHandler.removeCallbacks(it) }
+        val gen = popupGeneration.incrementAndGet()
+        val runnable = Runnable {
+            if (popupGeneration.get() != gen) return@Runnable
+            val currentState = QcyBleManager.state.value
+            if (!isPreview) {
+                if (!currentState.airpodsPopupEnabled || !QcyBleManager.isBluetoothEnabled()) {
+                    return@Runnable
+                }
+                if (!currentState.audioConnected && !currentState.connected) {
+                    return@Runnable
+                }
+            }
             if (canDrawOverlays(appCtx)) {
-                showWindowOverlay(appCtx)
+                showWindowOverlay(appCtx, isPreview)
             } else {
                 showFallbackNotification(appCtx)
             }
         }
+        pendingShowRunnable = runnable
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            runnable.run()
+        } else {
+            mainHandler.post(runnable)
+        }
     }
 
     fun dismiss() {
+        popupGeneration.incrementAndGet()
+        pendingShowRunnable?.let { mainHandler.removeCallbacks(it) }
+        pendingShowRunnable = null
         mainHandler.post {
             val trigger = dismissStateTrigger
             if (trigger != null) {
@@ -175,21 +254,44 @@ object AirPodsPopupController {
         owner?.destroy()
     }
 
+    private fun resolveOverlayContext(appCtx: Context): Context {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return runCatching {
+                val dm = appCtx.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+                val display = dm?.getDisplay(Display.DEFAULT_DISPLAY)
+                if (display != null) {
+                    appCtx.createWindowContext(
+                        display,
+                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                        null
+                    )
+                } else {
+                    appCtx
+                }
+            }.getOrDefault(appCtx)
+        }
+        return appCtx
+    }
+
     @SuppressLint("ClickableViewAccessibility")
-    private fun showWindowOverlay(appCtx: Context) {
+    private fun showWindowOverlay(appCtx: Context, isPreview: Boolean) {
         removeOverlayImmediately()
-        val wm = appCtx.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: return
+        val overlayCtx = resolveOverlayContext(appCtx)
+        val wm = overlayCtx.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+            ?: appCtx.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
+            ?: return
         val owner = OverlayLifecycleOwner()
         owner.createAndResume()
 
         val flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             flags,
             PixelFormat.TRANSLUCENT
@@ -197,12 +299,19 @@ object AirPodsPopupController {
             gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
         }
 
-        val composeView = ComposeView(appCtx).apply {
+        val composeView = ComposeView(overlayCtx).apply {
             setViewTreeLifecycleOwner(owner)
             setViewTreeSavedStateRegistryOwner(owner)
             setViewTreeViewModelStoreOwner(owner)
+            setOnTouchListener { _, event ->
+                if (event.action == MotionEvent.ACTION_OUTSIDE) {
+                    dismissStateTrigger?.invoke() ?: removeOverlayImmediately()
+                }
+                false
+            }
             setContent {
                 AirPodsPopupOverlayContent(
+                    isPreview = isPreview,
                     onRegisterDismissTrigger = { trigger ->
                         dismissStateTrigger = trigger
                     },
@@ -320,48 +429,52 @@ object AirPodsPopupController {
 
 @Composable
 private fun AirPodsPopupOverlayContent(
+    isPreview: Boolean,
     onRegisterDismissTrigger: (() -> Unit) -> Unit,
     onDismissed: () -> Unit
 ) {
     val state by QcyBleManager.state.collectAsState()
     val colors = rememberAppleColors()
     val haptics = rememberAppleHaptics()
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val slideOffsetPx = with(density) { 180.dp.toPx() }
 
-    var visible by remember { mutableStateOf(false) }
-    var hasBeenShown by remember { mutableStateOf(false) }
-    var hadActiveLink by remember { mutableStateOf(false) }
+    val progress = remember { Animatable(1f) }
+    var dismissing by remember { androidx.compose.runtime.mutableStateOf(false) }
+    var hadActiveLink by remember { androidx.compose.runtime.mutableStateOf(false) }
     var interactionNonce by remember { mutableIntStateOf(0) }
 
-    val triggerDismiss = {
-        if (visible) {
-            visible = false
+    val triggerDismiss: () -> Unit = {
+        if (!dismissing) {
+            dismissing = true
+            scope.launch {
+                progress.animateTo(1f, animationSpec = tween(durationMillis = 200))
+                onDismissed()
+            }
         }
     }
 
     LaunchedEffect(Unit) {
         onRegisterDismissTrigger(triggerDismiss)
-        hasBeenShown = true
-        visible = true
+        progress.animateTo(0f, animationSpec = AppleMotion.criticalSpring())
     }
 
     // Auto-dismiss 6s after appear or last interaction
-    LaunchedEffect(visible, hasBeenShown, interactionNonce) {
-        if (visible) {
+    LaunchedEffect(dismissing, interactionNonce) {
+        if (!dismissing) {
             delay(6_000L)
-            visible = false
-        } else if (hasBeenShown) {
-            // Wait for exit animation before detaching WindowManager view
-            delay(280L)
-            onDismissed()
+            triggerDismiss()
         }
     }
 
     // Dismiss early only if both BT Audio and BLE GATT drop after having been active
-    LaunchedEffect(state.connected, state.audioConnected) {
+    LaunchedEffect(state.connected, state.audioConnected, isPreview) {
+        if (isPreview) return@LaunchedEffect
         if (state.connected || state.audioConnected) {
             hadActiveLink = true
-        } else if (hadActiveLink && visible) {
-            visible = false
+        } else if (hadActiveLink && !dismissing) {
+            triggerDismiss()
         }
     }
 
@@ -371,138 +484,125 @@ private fun AirPodsPopupOverlayContent(
     ) {
         Box(
             modifier = Modifier
-                .fillMaxSize()
-                .background(if (visible) Color.Black.copy(alpha = 0.28f) else Color.Transparent)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null
-                ) {
-                    triggerDismiss()
-                }
+                .fillMaxWidth()
                 .navigationBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             contentAlignment = Alignment.BottomCenter
         ) {
-            AnimatedVisibility(
-                visible = visible,
-                enter = slideInVertically(
-                    animationSpec = AppleMotion.criticalSpring(),
-                    initialOffsetY = { it / 2 }
-                ) + fadeIn(),
-                exit = slideOutVertically(
-                    animationSpec = AppleMotion.criticalSpring(),
-                    targetOffsetY = { it }
-                ) + fadeOut()
-            ) {
-                // Use translucent fallback (`useHaze = false`) because WindowManager has no HazeSource
-                GlassSurface(
-                    hazeState = null,
-                    useHaze = false,
-                    cornerRadius = 30.dp,
-                    specular = 0.56f,
-                    modifier = Modifier
-                        .widthIn(max = 420.dp)
-                        .fillMaxWidth()
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) {
-                            interactionNonce++
-                        }
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 20.dp, vertical = 18.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
+            // Use translucent fallback (`useHaze = false`) because WindowManager has no HazeSource
+            GlassSurface(
+                hazeState = null,
+                useHaze = false,
+                cornerRadius = 30.dp,
+                specular = 0.56f,
+                modifier = Modifier
+                    .widthIn(max = 420.dp)
+                    .fillMaxWidth()
+                    .graphicsLayer {
+                        translationY = progress.value * slideOffsetPx
+                        alpha = (1f - progress.value).coerceIn(0f, 1f)
+                    }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
                     ) {
-                        // Grabber handle
+                        interactionNonce++
+                    }
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 18.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    // Grabber handle
+                    Box(
+                        modifier = Modifier
+                            .size(width = 36.dp, height = 4.dp)
+                            .clip(CircleShape)
+                            .background(colors.secondaryLabel.copy(alpha = 0.35f))
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Text(
+                        text = state.modelTitle,
+                        style = AppleTypography.title3,
+                        color = colors.label,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         Box(
                             modifier = Modifier
-                                .size(width = 36.dp, height = 4.dp)
+                                .size(7.dp)
                                 .clip(CircleShape)
-                                .background(colors.secondaryLabel.copy(alpha = 0.35f))
+                                .background(if (state.connected) colors.green else colors.accent)
                         )
-                        Spacer(modifier = Modifier.height(14.dp))
-
                         Text(
-                            text = state.modelTitle,
-                            style = AppleTypography.title3,
-                            color = colors.label,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(7.dp)
-                                    .clip(CircleShape)
-                                    .background(if (state.connected) colors.green else colors.accent)
-                            )
-                            Text(
-                                text = if (state.connected) {
-                                    "Conectado · ${QcyProtocol.formatAncShortLabel(state.ancCmdId)}"
-                                } else {
-                                    "Áudio conectado · sincronizando..."
-                                },
-                                style = AppleTypography.footnote,
-                                color = colors.secondaryLabel
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(18.dp))
-
-                        val bat = state.battery
-                        val hasCase = bat.caseLevel > 0 || bat.caseCharging
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            PopupBatteryRing(
-                                label = "Esquerdo",
-                                level = bat.left,
-                                charging = bat.leftCharging
-                            )
-                            PopupBatteryRing(
-                                label = "Direito",
-                                level = bat.right,
-                                charging = bat.rightCharging
-                            )
-                            if (hasCase) {
-                                PopupBatteryRing(
-                                    label = "Estojo",
-                                    level = bat.caseLevel,
-                                    charging = bat.caseCharging
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(18.dp))
-
-                        PortalSegmentedControl(
-                            items = AncCycleMode.entries,
-                            selectedItem = state.ancCycleMode,
-                            labelProvider = { it.label },
-                            onSelect = { mode ->
-                                interactionNonce++
-                                QcyBleManager.setAncCycleMode(mode)
-                            }
-                        )
-
-                        Spacer(modifier = Modifier.height(14.dp))
-
-                        ApplePillButton(
-                            text = "Fechar",
-                            prominent = false,
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = { triggerDismiss() }
+                            text = if (state.connected) {
+                                "Conectado · ${QcyProtocol.formatAncShortLabel(state.ancCmdId)}"
+                            } else if (isPreview) {
+                                "Pré-visualização do pop-up"
+                            } else {
+                                "Áudio conectado · sincronizando..."
+                            },
+                            style = AppleTypography.footnote,
+                            color = colors.secondaryLabel
                         )
                     }
+
+                    Spacer(modifier = Modifier.height(18.dp))
+
+                    val bat = state.battery
+                    val hasCase = bat.caseLevel > 0 || bat.caseCharging
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        PopupBatteryRing(
+                            label = "Esquerdo",
+                            level = bat.left,
+                            charging = bat.leftCharging
+                        )
+                        PopupBatteryRing(
+                            label = "Direito",
+                            level = bat.right,
+                            charging = bat.rightCharging
+                        )
+                        if (hasCase) {
+                            PopupBatteryRing(
+                                label = "Estojo",
+                                level = bat.caseLevel,
+                                charging = bat.caseCharging
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(18.dp))
+
+                    PortalSegmentedControl(
+                        items = AncCycleMode.entries,
+                        selectedItem = state.ancCycleMode,
+                        labelProvider = { it.label },
+                        onSelect = { mode ->
+                            interactionNonce++
+                            QcyBleManager.setAncCycleMode(mode)
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    ApplePillButton(
+                        text = "Fechar",
+                        prominent = false,
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { triggerDismiss() }
+                    )
                 }
             }
         }
