@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="LiquidGlassPopupWindowAnimation">
+        <item name="android:windowEnterAnimation">@anim/liquid_glass_enter</item>
+        <item name="android:windowExitAnimation">@anim/liquid_glass_exit</item>
+    </style>
+
+    <style name="Theme.Quicky.LiquidGlassOverlay" parent="@android:style/Theme.DeviceDefault.Dialog.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@drawable/bg_liquid_glass_popup</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowClipToOutline">true</item>
+        <item name="android:windowAnimationStyle">@style/LiquidGlassPopupWindowAnimation</item>
+        <item name="android:windowBackgroundBlurRadius" tools:targetApi="s">48dp</item>
+    </style>
+</resources>
