@@ -73,6 +73,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
+import android.os.Build
 import me.muriloscolari.quicky.BuildConfig
 import me.muriloscolari.quicky.ble.AncCycleMode
 import me.muriloscolari.quicky.ble.AncSubScene
@@ -83,6 +84,7 @@ import me.muriloscolari.quicky.ble.QcyKeyId
 import me.muriloscolari.quicky.ble.QcyProtocol
 import me.muriloscolari.quicky.ble.QcyUiState
 import me.muriloscolari.quicky.ble.UiStyle
+import me.muriloscolari.quicky.service.QcyDeviceControlsService
 import me.muriloscolari.quicky.update.ReleaseInfo
 import me.muriloscolari.quicky.update.UpdateSource
 import kotlin.math.roundToInt
@@ -1340,6 +1342,43 @@ private fun AppleSettingsList(
                                 text = "Testar",
                                 prominent = false,
                                 onClick = { AirPodsPopupController.showPreview(context) }
+                            )
+                        }
+                    )
+                }
+            }
+        }
+
+        // Control Center / Device Controls Card (Android 11+ / Xiaomi HyperOS / Samsung OneUI / AOSP)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            item(key = "device_controls") {
+                val context = LocalContext.current
+                var hint by remember { mutableStateOf<String?>(null) }
+                PortalCard {
+                    PortalListRow(
+                        title = "Widget no Centro de Controle",
+                        subtitle = hint ?: if (isXiaomiDevice) {
+                            "Selecione QuiCkY QCY em Casa inteligente no Centro de Controle"
+                        } else {
+                            "Adicione QuiCkY QCY em Controles de dispositivos do Android"
+                        },
+                        leading = {
+                            AppleIconBadge(backgroundColor = colors.accent) {
+                                Text("⊞", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                            }
+                        },
+                        trailing = {
+                            ApplePillButton(
+                                text = "Adicionar",
+                                prominent = true,
+                                onClick = {
+                                    val ok = QcyDeviceControlsService.requestAddControlToSystem(context)
+                                    hint = if (ok) {
+                                        "Solicitado · selecione QuiCkY QCY no Centro de Controle"
+                                    } else {
+                                        "Selecione QuiCkY QCY em Casa inteligente no Centro de Controle"
+                                    }
+                                }
                             )
                         }
                     )

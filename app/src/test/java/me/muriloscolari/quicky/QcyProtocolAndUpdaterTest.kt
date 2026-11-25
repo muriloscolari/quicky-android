@@ -2,8 +2,11 @@ package me.muriloscolari.quicky
 
 import me.muriloscolari.quicky.ble.AncCycleMode
 import me.muriloscolari.quicky.ble.AncSubScene
+import me.muriloscolari.quicky.ble.QcyBattery
 import me.muriloscolari.quicky.ble.QcyEqPreset
 import me.muriloscolari.quicky.ble.QcyProtocol
+import me.muriloscolari.quicky.ble.UiStyle
+import me.muriloscolari.quicky.service.QcyDeviceControlsLogic
 import me.muriloscolari.quicky.update.AppUpdater
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -149,5 +152,47 @@ class QcyProtocolAndUpdaterTest {
         assertNotNull(parsedParam)
         assertEquals(QcyEqPreset.HEAVY_BASS, parsedParam!!.preset)
         assertEquals(QcyEqPreset.HEAVY_BASS.defaultBands, parsedParam.bands)
+    }
+
+    @Test
+    fun deviceControlsLogicFormatsBatteryWithoutFakeCaseZero() {
+        val noCase = QcyBattery(left = 85, right = 90, caseLevel = 0, caseCharging = false)
+        assertEquals("E 85% · D 90%", QcyDeviceControlsLogic.formatBatterySummary(noCase, "QCY MeloBuds Pro"))
+
+        val withCase = QcyBattery(left = 85, right = 90, caseLevel = 65, caseCharging = false)
+        assertEquals("E 85% · D 90% · Estojo 65%", QcyDeviceControlsLogic.formatBatterySummary(withCase, "QCY MeloBuds Pro"))
+
+        val unknown = QcyBattery()
+        assertEquals("QCY MeloBuds Pro", QcyDeviceControlsLogic.formatBatterySummary(unknown, "QCY MeloBuds Pro"))
+    }
+
+    @Test
+    fun deviceControlsLogicResolvesAncAndAmbientSliderLevels() {
+        // Multi-level scene preserves its scene when dragged
+        assertEquals(
+            AncSubScene.COMMUTING.cmdIdForLevel(2),
+            QcyDeviceControlsLogic.resolveAncCmdIdForSliderLevel(
+                level = 2,
+                currentCmdId = AncSubScene.COMMUTING.cmdIdForLevel(3),
+                preferredAncCmdId = AncSubScene.INDOOR.defaultCmdId
+            )
+        )
+        // Single-level scene (Adaptive) falls back to Indoor when dragged
+        assertEquals(
+            AncSubScene.INDOOR.cmdIdForLevel(1),
+            QcyDeviceControlsLogic.resolveAncCmdIdForSliderLevel(
+                level = 1,
+                currentCmdId = AncSubScene.ADAPTIVE.defaultCmdId,
+                preferredAncCmdId = AncSubScene.ADAPTIVE.defaultCmdId
+            )
+        )
+        assertEquals(3, QcyDeviceControlsLogic.ancSliderLevel(AncSubScene.ADAPTIVE.defaultCmdId, AncSubScene.INDOOR.defaultCmdId))
+        assertEquals(2, QcyDeviceControlsLogic.ancSliderLevel(AncSubScene.NOISY.cmdIdForLevel(2), AncSubScene.INDOOR.defaultCmdId))
+        assertEquals(6, QcyDeviceControlsLogic.resolveAmbientLevel(QcyProtocol.ambientCmdIdForLevel(6), AncCycleMode.AMBIENT.meloBudsCmdId))
+    }
+
+    @Test
+    fun uiStyleContainsOnlyMaterialYouAndAppleLiquidGlass() {
+        assertEquals(listOf(UiStyle.MATERIAL_YOU, UiStyle.APPLE_LIQUID_GLASS), UiStyle.entries)
     }
 }

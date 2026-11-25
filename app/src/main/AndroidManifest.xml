@@ -75,6 +75,18 @@
             </intent-filter>
         </service>
 
+        <service
+            android:name=".service.QcyDeviceControlsService"
+            android:enabled="@bool/enable_device_controls"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:label="@string/device_controls_label"
+            android:permission="android.permission.BIND_CONTROLS">
+            <intent-filter>
+                <action android:name="android.service.controls.ControlsProviderService" />
+            </intent-filter>
+        </service>
+
         <receiver
             android:name=".service.QcyBluetoothReceiver"
             android:exported="true">

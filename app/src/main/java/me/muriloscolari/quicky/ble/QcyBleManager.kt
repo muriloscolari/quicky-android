@@ -40,9 +40,8 @@ import kotlin.math.PI
 import kotlin.math.sin
 
 enum class UiStyle(val label: String, val subtitle: String) {
-    APPLE_LIQUID_GLASS("Apple Liquid Glass", "Estética iOS com barras em vidro e cartões agrupados"),
-    XIAOMI_HYPEROS("Xiaomi HyperOS", "Blur translúcido e visual glassmorphism"),
-    MATERIAL_LIGHTWEIGHT("Material 3 (Leve)", "Superfícies sólidas para celulares mais simples")
+    MATERIAL_YOU("Material You", "Cores dinâmicas do sistema e design Material 3"),
+    APPLE_LIQUID_GLASS("Apple Liquid Glass", "Estética iOS com barras em vidro e cartões agrupados")
 }
 
 data class ScannedQcyDevice(
@@ -82,7 +81,7 @@ data class QcyUiState(
     val airpodsPopupEnabled: Boolean = true,
     val notificationsEnabled: Boolean = false,
     val findingSide: FindEarbudSide? = null,
-    val uiStyle: UiStyle = UiStyle.APPLE_LIQUID_GLASS,
+    val uiStyle: UiStyle = UiStyle.MATERIAL_YOU,
     val updateSource: UpdateSource = UpdateSource.FORGEJO,
     val autoCheckUpdates: Boolean = true,
     val lastSavedAddress: String = "",
@@ -162,6 +161,8 @@ object QcyBleManager {
 
     private var fastAutoConnectTarget: String? = null
     private var pendingAncTargetMode: AncCycleMode? = null
+    private var pendingSleepModeTarget: Boolean? = null
+    private var pendingLowLatencyTarget: Boolean? = null
     private var gattRetryAttempted = false
     private var autoSleepVerifyRetries = 0
     private var wakeLock: PowerManager.WakeLock? = null
@@ -184,7 +185,7 @@ object QcyBleManager {
         appContext = ctx
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val autoSleep = prefs.getBoolean(KEY_AUTO_SLEEP, true)
-        val styleName = prefs.getString(KEY_UI_STYLE, UiStyle.APPLE_LIQUID_GLASS.name) ?: UiStyle.APPLE_LIQUID_GLASS.name
+        val styleName = prefs.getString(KEY_UI_STYLE, UiStyle.MATERIAL_YOU.name) ?: UiStyle.MATERIAL_YOU.name
         val sourceName = prefs.getString(KEY_UPDATE_SOURCE, UpdateSource.FORGEJO.name) ?: UpdateSource.FORGEJO.name
         val autoUpdate = prefs.getBoolean(KEY_AUTO_UPDATE, true)
         val lastAddr = prefs.getString(KEY_LAST_ADDRESS, "") ?: ""
@@ -209,7 +210,11 @@ object QcyBleManager {
             ?: savedEqPreset.defaultBands
         val airpodsPopupEnabled = prefs.getBoolean(KEY_AIRPODS_POPUP, true)
 
-        val style = runCatching { UiStyle.valueOf(styleName) }.getOrDefault(UiStyle.APPLE_LIQUID_GLASS)
+        val style = when (styleName) {
+            UiStyle.APPLE_LIQUID_GLASS.name -> UiStyle.APPLE_LIQUID_GLASS
+            UiStyle.MATERIAL_YOU.name, "MATERIAL_LIGHTWEIGHT", "XIAOMI_HYPEROS" -> UiStyle.MATERIAL_YOU
+            else -> UiStyle.MATERIAL_YOU
+        }
         val source = runCatching { UpdateSource.valueOf(sourceName) }.getOrDefault(UpdateSource.FORGEJO)
         val savedAnc = runCatching { AncCycleMode.valueOf(savedAncName) }.getOrDefault(AncCycleMode.OFF)
         val initialCmdId = when (savedAnc) {
@@ -881,6 +886,8 @@ object QcyBleManager {
     fun disconnect(resetPending: Boolean = true) {
         if (resetPending) {
             pendingAncTargetMode = null
+            pendingSleepModeTarget = null
+            pendingLowLatencyTarget = null
         }
         clearGattQueue(notifyFailure = false)
         autoSleepVerifyRetries = 0
@@ -1002,26 +1009,35 @@ object QcyBleManager {
             versionChar?.let { enqueueGattOp(GattOp.ReadChar(it)) }
             eqChar?.let { enqueueGattOp(GattOp.ReadChar(it)) }
 
-            // 3. CRITICAL FEATURE: Auto-enable Sleep Mode (ignore lateral touch controls) on connect
-            val willAutoSleep = _state.value.autoSleepOnConnect
+            // 3. CRITICAL FEATURE: Auto-enable Sleep Mode (ignore lateral touch controls) on connect,
+            //    unless an explicit queued Sleep Mode action from Device Controls overrides it.
+            val pendingSleep = pendingSleepModeTarget
+            pendingSleepModeTarget = null
+            val pendingLowLat = pendingLowLatencyTarget
+            pendingLowLatencyTarget = null
+            val willAutoSleep = pendingSleep == null && _state.value.autoSleepOnConnect
+            val targetSleep = pendingSleep ?: if (willAutoSleep) true else null
             val pendingAnc = pendingAncTargetMode
             pendingAncTargetMode = null
 
-            if (willAutoSleep) {
+            val hasFollowUpPending = pendingAnc != null || pendingLowLat != null
+
+            if (targetSleep != null) {
                 commandChar?.let { cChar ->
                     enqueueGattOp(
-                        GattOp.WriteChar(cChar, QcyProtocol.buildSleepModeCommand(true)) { sent ->
+                        GattOp.WriteChar(cChar, QcyProtocol.buildSleepModeCommand(targetSleep)) { sent ->
                             _state.update {
                                 it.copy(
-                                    sleepModeEnabled = if (sent) true else it.sleepModeEnabled,
-                                    statusMessage = if (sent) {
-                                        "Toques na lateral bloqueados automaticamente (Modo Sono)"
-                                    } else {
-                                        it.statusMessage
+                                    sleepModeEnabled = if (sent) targetSleep else it.sleepModeEnabled,
+                                    statusMessage = when {
+                                        !sent -> it.statusMessage
+                                        willAutoSleep -> "Toques na lateral bloqueados automaticamente (Modo Sono)"
+                                        targetSleep -> "Modo Sono ativado (toques bloqueados)"
+                                        else -> "Modo Sono desativado (toques liberados)"
                                     }
                                 )
                             }
-                            if (pendingAnc == null) {
+                            if (!hasFollowUpPending) {
                                 mainHandler.postDelayed({ notifyConnectWaiters() }, 250L)
                             }
                         }
@@ -1029,7 +1045,7 @@ object QcyBleManager {
                 }
             }
 
-            // 4. Execute any queued ANC mode triggered from Quick Settings Tile while disconnected
+            // 4. Execute any queued ANC mode triggered from Quick Settings Tile or Device Controls while disconnected
             if (pendingAnc != null) {
                 commandChar?.let { cChar ->
                     val targetCmdId = preferredCmdIdForMode(pendingAnc)
@@ -1043,11 +1059,36 @@ object QcyBleManager {
                                     statusMessage = "Modo de ruído: ${QcyProtocol.formatAncShortLabel(targetCmdId)}"
                                 )
                             }
+                            if (pendingLowLat == null) {
+                                mainHandler.postDelayed({ notifyConnectWaiters() }, 250L)
+                            }
+                        }
+                    )
+                }
+            }
+
+            // 4b. Execute any queued Low Latency (Game Mode) command from Device Controls
+            if (pendingLowLat != null) {
+                commandChar?.let { cChar ->
+                    enqueueGattOp(
+                        GattOp.WriteChar(cChar, QcyProtocol.buildLowLatencyCommand(pendingLowLat)) { sent ->
+                            _state.update {
+                                it.copy(
+                                    lowLatencyEnabled = if (sent) pendingLowLat else it.lowLatencyEnabled,
+                                    statusMessage = if (sent) {
+                                        if (pendingLowLat) "Modo Jogo (baixa latência) ativado" else "Modo Jogo desativado"
+                                    } else {
+                                        it.statusMessage
+                                    }
+                                )
+                            }
                             mainHandler.postDelayed({ notifyConnectWaiters() }, 250L)
                         }
                     )
                 }
-            } else if (!willAutoSleep) {
+            }
+
+            if (targetSleep == null && !hasFollowUpPending) {
                 mainHandler.postDelayed({ notifyConnectWaiters() }, 300L)
             }
 
@@ -1315,6 +1356,37 @@ object QcyBleManager {
         }
     }
 
+    fun setSleepModeAndEnsureConnected(enabled: Boolean, onFinished: (() -> Unit)? = null) {
+        if (_state.value.connected && bluetoothGatt != null && commandChar != null) {
+            val packet = QcyProtocol.buildSleepModeCommand(enabled)
+            val queued = writeCommand(packet) { sent ->
+                if (sent) {
+                    _state.update {
+                        it.copy(
+                            sleepModeEnabled = enabled,
+                            statusMessage = if (enabled) "Modo Sono ativado (toques bloqueados)" else "Modo Sono desativado (toques liberados)"
+                        )
+                    }
+                    onFinished?.invoke()
+                } else {
+                    disconnect(resetPending = false)
+                    pendingSleepModeTarget = enabled
+                    connectOrAutoScan(onFinished = onFinished)
+                }
+            }
+            if (queued) return
+            disconnect(resetPending = false)
+        }
+        pendingSleepModeTarget = enabled
+        _state.update {
+            it.copy(
+                sleepModeEnabled = enabled,
+                statusMessage = if (enabled) "Conectando para ativar Modo Sono..." else "Conectando para liberar toques..."
+            )
+        }
+        connectOrAutoScan(onFinished = onFinished)
+    }
+
     fun setLowLatency(enabled: Boolean) {
         val packet = QcyProtocol.buildLowLatencyCommand(enabled)
         writeCommand(packet)
@@ -1324,6 +1396,37 @@ object QcyBleManager {
                 statusMessage = if (enabled) "Modo Jogo (baixa latência) ativado" else "Modo Jogo desativado"
             )
         }
+    }
+
+    fun setLowLatencyAndEnsureConnected(enabled: Boolean, onFinished: (() -> Unit)? = null) {
+        if (_state.value.connected && bluetoothGatt != null && commandChar != null) {
+            val packet = QcyProtocol.buildLowLatencyCommand(enabled)
+            val queued = writeCommand(packet) { sent ->
+                if (sent) {
+                    _state.update {
+                        it.copy(
+                            lowLatencyEnabled = enabled,
+                            statusMessage = if (enabled) "Modo Jogo (baixa latência) ativado" else "Modo Jogo desativado"
+                        )
+                    }
+                    onFinished?.invoke()
+                } else {
+                    disconnect(resetPending = false)
+                    pendingLowLatencyTarget = enabled
+                    connectOrAutoScan(onFinished = onFinished)
+                }
+            }
+            if (queued) return
+            disconnect(resetPending = false)
+        }
+        pendingLowLatencyTarget = enabled
+        _state.update {
+            it.copy(
+                lowLatencyEnabled = enabled,
+                statusMessage = if (enabled) "Conectando para ativar Modo Jogo..." else "Conectando para desativar Modo Jogo..."
+            )
+        }
+        connectOrAutoScan(onFinished = onFinished)
     }
 
     fun setLdacEnabled(enabled: Boolean) {
@@ -1609,20 +1712,31 @@ object QcyBleManager {
         val packet = QcyProtocol.buildAncCommand(cmdId)
         val cycleMode = QcyProtocol.modeFromCmdId(cmdId)
         val label = QcyProtocol.formatAncShortLabel(cmdId)
-        val sent = if (_state.value.connected && bluetoothGatt != null && commandChar != null) {
-            writeCommand(packet)
-        } else {
-            pendingAncTargetMode = cycleMode
-            if (!_state.value.connecting && !isScanning) {
-                connectOrAutoScan()
+        if (_state.value.connected && bluetoothGatt != null && commandChar != null) {
+            persistAncSelection(
+                cmdId = cmdId,
+                cycleMode = cycleMode,
+                statusMessage = "Modo de ruído: $label"
+            )
+            val queued = writeCommand(packet) { sent ->
+                if (!sent) {
+                    disconnect(resetPending = false)
+                    pendingAncTargetMode = cycleMode
+                    connectOrAutoScan()
+                }
             }
-            false
+            if (queued) return
+            disconnect(resetPending = false)
         }
+        pendingAncTargetMode = cycleMode
         persistAncSelection(
             cmdId = cmdId,
             cycleMode = cycleMode,
-            statusMessage = if (sent) "Modo de ruído: $label" else "Conectando para $label..."
+            statusMessage = "Conectando para $label..."
         )
+        if (!_state.value.connecting && !isScanning) {
+            connectOrAutoScan()
+        }
     }
 
     fun setAncCycleMode(mode: AncCycleMode) {

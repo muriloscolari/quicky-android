@@ -14,4 +14,6 @@
 -keep public class me.muriloscolari.quicky.MainActivity
 -keep public class me.muriloscolari.quicky.service.QcyControlService
 -keep public class me.muriloscolari.quicky.service.QcyAncTileService
+-keep public class me.muriloscolari.quicky.service.QcyCompanionService
+-keep public class me.muriloscolari.quicky.service.QcyDeviceControlsService
 -keep public class me.muriloscolari.quicky.service.QcyBluetoothReceiver
