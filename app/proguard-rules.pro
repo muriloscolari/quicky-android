@@ -12,6 +12,7 @@
 
 # Keep Android components referenced in AndroidManifest.xml
 -keep public class me.muriloscolari.quicky.MainActivity
+-keep public class me.muriloscolari.quicky.DeviceControlsPanelActivity
 -keep public class me.muriloscolari.quicky.service.QcyControlService
 -keep public class me.muriloscolari.quicky.service.QcyAncTileService
 -keep public class me.muriloscolari.quicky.service.QcyCompanionService

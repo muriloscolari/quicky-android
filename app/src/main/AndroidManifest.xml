@@ -50,6 +50,17 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".DeviceControlsPanelActivity"
+            android:enabled="@bool/enable_device_controls"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:launchMode="singleInstance"
+            android:permission="android.permission.BIND_CONTROLS"
+            android:resizeableActivity="true"
+            android:showWhenLocked="true"
+            android:taskAffinity="" />
+
         <service
             android:name=".service.QcyControlService"
             android:exported="false"
@@ -82,6 +93,9 @@
             android:icon="@mipmap/ic_launcher"
             android:label="@string/device_controls_label"
             android:permission="android.permission.BIND_CONTROLS">
+            <meta-data
+                android:name="android.service.controls.META_DATA_PANEL_ACTIVITY"
+                android:value="${applicationId}/.DeviceControlsPanelActivity" />
             <intent-filter>
                 <action android:name="android.service.controls.ControlsProviderService" />
             </intent-filter>

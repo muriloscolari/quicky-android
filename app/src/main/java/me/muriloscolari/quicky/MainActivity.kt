@@ -55,7 +55,9 @@ import me.muriloscolari.quicky.update.AppUpdater
 import me.muriloscolari.quicky.update.ReleaseInfo
 import me.muriloscolari.quicky.update.UpdateSource
 
-class MainActivity : ComponentActivity() {
+open class MainActivity : ComponentActivity() {
+
+    protected open val isEmbeddedPanel: Boolean = false
 
     private var onBackgroundPermissionRefresh: (() -> Unit)? = null
 
@@ -147,7 +149,7 @@ class MainActivity : ComponentActivity() {
             }
 
             LaunchedEffect(Unit) {
-                if (state.autoCheckUpdates) {
+                if (!isEmbeddedPanel && state.autoCheckUpdates) {
                     checkForUpdates(state.updateSource)
                 }
             }
@@ -273,7 +275,7 @@ class MainActivity : ComponentActivity() {
 
         if (needed.isEmpty()) {
             QcyControlService.start(this)
-        } else {
+        } else if (!isEmbeddedPanel) {
             permissionLauncher.launch(needed.toTypedArray())
         }
     }
